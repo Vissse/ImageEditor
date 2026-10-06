@@ -1,0 +1,26 @@
+# Virtuální prostředí
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Výstup PyInstalleru - exe se neverzuje v gitu, ale jako příloha GitHub Release
+dist/
+build/
+*.spec
+*.exe
+
+# Stav zpracování fotek (vzniká uvnitř složek s fotkami)
+.photobatch_state.json
+
+# Testovací data a dočasné soubory
+test_photos/
+_t*.py
+screenshot*.png
+
+# Editory
+.vscode/
+.idea/
