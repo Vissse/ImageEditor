@@ -12,6 +12,7 @@ dist/
 build/
 *.spec
 *.exe
+Output/
 
 # Stav zpracování fotek (vzniká uvnitř složek s fotkami)
 .photobatch_state.json

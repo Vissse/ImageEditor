@@ -1,19 +1,34 @@
-# Rebuilds PhotoBatchEditor.exe. Run from this project folder.
-# PyInstaller's atomic file writes fail on very long/deep Windows paths
-# (MAX_PATH), so if this project ever lives under a long path, build into
-# a short one (e.g. C:\pbe_build) instead and copy the result back here.
+# Builds the app (PyInstaller, one folder) and the installer (Inno Setup).
+# Result: Output\ImageEditor_Setup.exe. Run from this project folder.
+# Needs Inno Setup 6 (https://jrsoftware.org/isinfo.php).
 
-$ErrorActionPreference = "Stop"
 $projectDir = $PSScriptRoot
+Set-Location $projectDir
 
-pip install -r (Join-Path $projectDir "requirements.txt")
+function Run-Step([string]$what, [scriptblock]$command) {
+    & $command
+    if ($LASTEXITCODE -ne 0) { throw "$what selhalo (kod $LASTEXITCODE)" }
+}
 
-python -m PyInstaller --noconfirm --onefile --windowed --name PhotoBatchEditor `
-    --collect-all PySide6 `
-    --icon (Join-Path $projectDir "icon.ico") `
-    --add-data "$(Join-Path $projectDir 'icon.ico');." `
-    (Join-Path $projectDir "main.py")
+Run-Step "Instalace zavislosti" { pip install -q --disable-pip-version-check -r requirements.txt }
 
-Copy-Item -Force (Join-Path $projectDir "dist\PhotoBatchEditor.exe") (Join-Path $projectDir "PhotoBatchEditor.exe")
-Remove-Item -Recurse -Force (Join-Path $projectDir "build"), (Join-Path $projectDir "dist"), (Join-Path $projectDir "PhotoBatchEditor.spec") -ErrorAction SilentlyContinue
-Write-Host "Hotovo: $projectDir\PhotoBatchEditor.exe"
+Run-Step "PyInstaller" {
+    python -m PyInstaller --noconfirm --onedir --windowed --name ImageEditor `
+        --icon icon.ico `
+        --add-data "icon.ico;." `
+        main.py
+}
+
+$env:APP_VERSION = python -c "from core.config import CURRENT_VERSION; print(CURRENT_VERSION)"
+
+$iscc = @(
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) { throw "Inno Setup 6 (ISCC.exe) nenalezen." }
+
+Run-Step "Inno Setup" { & $iscc inno.iss }
+
+Remove-Item -Recurse -Force build, ImageEditor.spec -ErrorAction SilentlyContinue
+Write-Host "Hotovo: $projectDir\Output\ImageEditor_Setup.exe (verze $env:APP_VERSION)"

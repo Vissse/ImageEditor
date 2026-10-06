@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+from typing import Callable
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QSize, QSettings, QRect, QPoint, QEvent,
-    QPropertyAnimation, QEasingCurve, QTimer,
+    Qt, QThread, Signal, QSize, QSettings, QRect, QRectF, QPoint, QPointF, QEvent,
+    QPropertyAnimation, QEasingCurve, QTimer, QElapsedTimer,
 )
 from PySide6.QtGui import (
-    QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient,
+    QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QCursor,
+    QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,23 +24,28 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QFileDialog,
-    QStatusBar,
     QSizePolicy,
     QMessageBox,
     QGraphicsDropShadowEffect,
 )
 
 from core.processing import Operations, process_file, SUPPORTED_EXTENSIONS
-from core.config import CURRENT_VERSION
+from core.config import CURRENT_VERSION, APP_NAME
+from core.updater import (
+    UpdateCheckWorker, DownloadWorker, run_installer, can_self_update,
+)
+from splash import SplashScreen
+from preview import PreviewDialog
 from core.state import FolderState
 from core.watcher import FolderWatcher
 from style import (
     STYLE_SHEET, enable_windows_acrylic_blur, set_windows_titlebar,
-    ACCENT_COLOR, ACCENT_COLOR_2, SUCCESS_COLOR,
+    ACCENT_COLOR, SUCCESS_COLOR,
 )
 
 THUMB_SIZE = 220
 SCROLLBAR_RESERVE = 16
+GRID_TOP = 26
 
 
 def resource_path(filename: str) -> str:
@@ -74,8 +81,7 @@ def _glass_shadow(blur: int = 24, alpha: int = 90, y_offset: int = 6) -> QGraphi
     return effect
 
 
-_GLOW_A = QColor(ACCENT_COLOR)
-_GLOW_B = QColor(ACCENT_COLOR_2)
+_SELECT_STOPS = (QColor("#3fa9f5"), QColor(ACCENT_COLOR), QColor("#ff9f5a"))
 _GLOW_HOVER = QColor(255, 255, 255)
 _BADGE_COLOR = QColor(SUCCESS_COLOR)
 CARD_PAD = 17
@@ -88,6 +94,15 @@ def _with_alpha(color: QColor, alpha: int) -> QColor:
     c = QColor(color)
     c.setAlpha(max(0, min(255, alpha)))
     return c
+
+
+def _selection_gradient(rect, alpha: int) -> QLinearGradient:
+    """Blue -> purple -> orange, diagonally across `rect` (same hues as the app icon)."""
+    rect = QRectF(rect)
+    grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    for position, color in zip((0.0, 0.5, 1.0), _SELECT_STOPS):
+        grad.setColorAt(position, _with_alpha(color, alpha))
+    return grad
 
 
 class ThumbnailCard(QWidget):
@@ -180,11 +195,8 @@ class ThumbnailCard(QWidget):
         return QRect(CARD_PAD + (THUMB_SIZE - w) // 2, CARD_PAD + (THUMB_SIZE - h) // 2, w, h)
 
     @staticmethod
-    def _gradient(rect: QRect, a: QColor, b: QColor, alpha_a: int, alpha_b: int) -> QLinearGradient:
-        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        grad.setColorAt(0.0, _with_alpha(a, alpha_a))
-        grad.setColorAt(1.0, _with_alpha(b, alpha_b))
-        return grad
+    def _gradient(rect: QRect, alpha: int) -> QLinearGradient:
+        return _selection_gradient(rect, alpha)
 
     def _paint_glow(self, painter: QPainter, rect: QRect, spread: int, peak: int, gradient: bool) -> None:
         painter.setPen(Qt.NoPen)
@@ -192,7 +204,7 @@ class ThumbnailCard(QWidget):
             alpha = int(peak * (1 - i / (spread + 1)) ** 2)
             layer = rect.adjusted(-i, -i, i, i)
             if gradient:
-                painter.setBrush(QBrush(self._gradient(layer, _GLOW_A, _GLOW_B, alpha, alpha)))
+                painter.setBrush(QBrush(self._gradient(layer, alpha)))
             else:
                 painter.setBrush(_with_alpha(_GLOW_HOVER, alpha))
             painter.drawRoundedRect(layer, PLATE_RADIUS + i, PLATE_RADIUS + i)
@@ -221,7 +233,7 @@ class ThumbnailCard(QWidget):
 
         if self.selected:
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QBrush(self._gradient(plate, _GLOW_A, _GLOW_B, 255, 255)), 2))
+            painter.setPen(QPen(QBrush(self._gradient(plate, 255)), 2))
             painter.drawRoundedRect(plate.adjusted(1, 1, -1, -1), PLATE_RADIUS, PLATE_RADIUS)
 
         if self.processed:
@@ -244,6 +256,10 @@ class ThumbnailCard(QWidget):
         elided = painter.fontMetrics().elidedText(self.filename, Qt.ElideMiddle, name_rect.width())
         painter.drawText(name_rect, Qt.AlignHCenter | Qt.AlignTop, elided)
 
+    def plate_rect(self) -> QRect:
+        """The white plate in card coordinates - the clickable/selectable area."""
+        return self._image_rect().adjusted(-PLATE, -PLATE, PLATE, PLATE)
+
     def set_processed(self, processed: bool, repaint_only: bool = False) -> None:
         self.processed = processed
         self.update()
@@ -257,13 +273,6 @@ class ThumbnailCard(QWidget):
             self.update()
             self.toggled.emit()
 
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self.selected = not self.selected
-            self.update()
-            self.toggled.emit()
-        super().mousePressEvent(event)
-
     def enterEvent(self, event) -> None:
         self._hovered = True
         self.update()
@@ -273,6 +282,181 @@ class ThumbnailCard(QWidget):
         self._hovered = False
         self.update()
         super().leaveEvent(event)
+
+
+class _Marquee(QWidget):
+    """Translucent selection rectangle drawn above the cards."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._rect = QRect()
+        self.hide()
+
+    def set_rect(self, rect: QRect) -> None:
+        self._rect = rect
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self._rect.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self._rect).adjusted(0.5, 0.5, -0.5, -0.5)
+        fill = _selection_gradient(rect, 60)
+        edge = _selection_gradient(rect, 235)
+        painter.setBrush(QBrush(fill))
+        painter.setPen(QPen(QBrush(edge), 1.5))
+        painter.drawRoundedRect(rect, 5, 5)
+
+
+class GridCanvas(QWidget):
+    """Holds the thumbnails and does the rubber-band selection. It does not
+    receive the mouse itself: SelectionPanel forwards presses from anywhere in
+    the panel, so dragging works over the whole container, not just the grid."""
+
+    card_clicked = Signal(str)
+    selection_changed = Signal()
+
+    DRAG_THRESHOLD = 6
+    EDGE = 28
+
+    def __init__(self):
+        super().__init__()
+        self.cards_getter: Callable[[], dict[str, ThumbnailCard]] = dict
+        self.scrollbar = None
+        self.viewport = None
+        self._press: QPoint | None = None
+        self._press_card: str | None = None
+        self._dragging = False
+        self._additive = False
+        self._base: set[str] = set()
+        self._marquee = _Marquee(self)
+        self._autoscroll = QTimer(self)
+        self._autoscroll.setInterval(25)
+        self._autoscroll.timeout.connect(self._autoscroll_tick)
+
+    # -- helpers ----------------------------------------------------------------
+    def _card_rect(self, card: "ThumbnailCard") -> QRect:
+        return card.plate_rect().translated(card.pos())
+
+    def _card_at(self, pos: QPoint) -> str | None:
+        for name, card in self.cards_getter().items():
+            if self._card_rect(card).contains(pos):
+                return name
+        return None
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._marquee.setGeometry(self.rect())
+
+    def is_active(self) -> bool:
+        return self._press is not None
+
+    def clamp_to_canvas(self, pos: QPoint) -> QPoint:
+        return QPoint(max(0, min(self.width() - 1, pos.x())), max(0, min(self.height() - 1, pos.y())))
+
+    def clamp_to_visible(self, pos: QPoint) -> QPoint:
+        top = -self.pos().y()
+        bottom = top + (self.viewport.height() if self.viewport is not None else self.height()) - 1
+        return QPoint(max(0, min(self.width() - 1, pos.x())), max(top, min(bottom, pos.y())))
+
+    # -- selection gesture (driven by SelectionPanel) ---------------------------
+    def begin(self, raw: QPoint, additive: bool) -> None:
+        self._press = self.clamp_to_visible(raw)
+        self._press_card = self._card_at(raw) if self.rect().contains(raw) else None
+        self._dragging = False
+        self._additive = additive
+        self._base = {n for n, c in self.cards_getter().items() if c.is_checked()} if additive else set()
+
+    def drag_to(self, raw: QPoint) -> None:
+        if self._press is None:
+            return
+        pos = self.clamp_to_canvas(raw)
+        if not self._dragging:
+            if (pos - self._press).manhattanLength() < self.DRAG_THRESHOLD:
+                return
+            self._dragging = True
+            self._marquee.setGeometry(self.rect())
+            self._marquee.raise_()
+            self._marquee.show()
+            self._autoscroll.start()
+        rect = QRect(self._press, pos).normalized()
+        self._marquee.set_rect(rect)
+        hit = {n for n, c in self.cards_getter().items() if self._card_rect(c).intersects(rect)}
+        wanted = self._base | hit
+        for name, card in self.cards_getter().items():
+            card.set_checked(name in wanted)
+        self.selection_changed.emit()
+
+    def end(self) -> None:
+        if self._press is None:
+            return
+        if self._dragging:
+            self._marquee.hide()
+            self._marquee.set_rect(QRect())
+        elif self._press_card is not None:
+            card = self.cards_getter().get(self._press_card)
+            if card is not None:
+                if self._additive:
+                    card.set_checked(not card.is_checked())
+                    self.selection_changed.emit()
+                else:
+                    self.card_clicked.emit(self._press_card)
+        elif not self._additive:
+            for card in self.cards_getter().values():
+                card.set_checked(False)
+            self.selection_changed.emit()
+        self._autoscroll.stop()
+        self._press = None
+        self._press_card = None
+        self._dragging = False
+
+    def _autoscroll_tick(self) -> None:
+        if not self._dragging or self.scrollbar is None or self.viewport is None:
+            return
+        y = self.viewport.mapFromGlobal(QCursor.pos()).y()
+        height = self.viewport.height()
+        step = 0
+        if y < self.EDGE:
+            step = -max(4, (self.EDGE - y) // 2)
+        elif y > height - self.EDGE:
+            step = max(4, (y - (height - self.EDGE)) // 2)
+        if step:
+            self.scrollbar.setValue(self.scrollbar.value() + step)
+            self.drag_to(self.mapFromGlobal(QCursor.pos()))
+
+
+class SelectionPanel(QFrame):
+    """The glass panel around the grid. Mouse presses on any empty part of it
+    (padding, gaps, margins - children that handle the mouse, such as the
+    buttons and the scrollbar, keep their own events) start a drag selection."""
+
+    def __init__(self):
+        super().__init__()
+        self.canvas: GridCanvas | None = None
+
+    def _canvas_pos(self, event) -> QPoint:
+        return self.canvas.mapFrom(self, event.position().toPoint())
+
+    def mousePressEvent(self, event) -> None:
+        if self.canvas is not None and event.button() == Qt.LeftButton:
+            additive = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+            self.canvas.begin(self._canvas_pos(event), additive)
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.canvas is not None and self.canvas.is_active():
+            self.canvas.drag_to(self._canvas_pos(event))
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.canvas is not None and self.canvas.is_active() and event.button() == Qt.LeftButton:
+            self.canvas.end()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ProcessWorker(QThread):
@@ -299,7 +483,7 @@ class ProcessWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Photo Batch Editor")
+        self.setWindowTitle(APP_NAME)
         self.resize(1200, 780)
         icon_path = resource_path("icon.ico")
         if os.path.isfile(icon_path):
@@ -315,6 +499,7 @@ class MainWindow(QMainWindow):
         self.worker: ProcessWorker | None = None
 
         self._build_ui()
+        QShortcut(QKeySequence.SelectAll, self, activated=self.select_all)
         self._restore_last_folder()
 
     # -- UI construction -------------------------------------------------
@@ -333,15 +518,20 @@ class MainWindow(QMainWindow):
         columns.addWidget(self._build_folder_panel(), stretch=3)
         columns.addWidget(self._build_options_panel(), stretch=0)
 
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(6, 0, 6, 0)
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: rgba(241, 240, 250, 175); font-size: 12px;")
         version_label = QLabel(f"v{CURRENT_VERSION}")
-        version_label.setStyleSheet("color: rgba(255, 255, 255, 120); padding-right: 6px;")
-        self.status_bar.addPermanentWidget(version_label)
+        version_label.setStyleSheet("color: rgba(241, 240, 250, 120); font-size: 12px;")
+        footer.addWidget(self.status_label)
+        footer.addStretch(1)
+        footer.addWidget(version_label)
+        root.addLayout(footer)
         self._update_status()
 
     def _build_folder_panel(self) -> QFrame:
-        folder_panel = QFrame()
+        folder_panel = SelectionPanel()
         folder_panel.setObjectName("GlassPanel")
         folder_panel.setGraphicsEffect(_glass_shadow())
         layout = QVBoxLayout(folder_panel)
@@ -365,9 +555,15 @@ class MainWindow(QMainWindow):
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.viewport().installEventFilter(self)
-        self.grid_container = QWidget()
+        self.grid_container = GridCanvas()
         self.grid_container.setObjectName("Transparent")
+        self.grid_container.cards_getter = lambda: self.cards
+        self.grid_container.scrollbar = self.scroll_area.verticalScrollBar()
+        self.grid_container.viewport = self.scroll_area.viewport()
+        self.grid_container.card_clicked.connect(self._show_preview)
+        self.grid_container.selection_changed.connect(self._update_status)
         self.scroll_area.setWidget(self.grid_container)
+        folder_panel.canvas = self.grid_container
         layout.addWidget(self.scroll_area, stretch=1)
 
         return folder_panel
@@ -474,6 +670,10 @@ class MainWindow(QMainWindow):
         self._relayout(force=True)
         self._update_status()
 
+    def _show_preview(self, filename: str) -> None:
+        if self.folder:
+            PreviewDialog(self, os.path.join(self.folder, filename)).exec()
+
     def _relayout(self, force: bool = False) -> None:
         cell_w = THUMB_SIZE + CARD_PAD * 2
         cell_h = THUMB_SIZE + CARD_PAD * 2 + NAME_HEIGHT
@@ -494,9 +694,9 @@ class MainWindow(QMainWindow):
             if card.parent() is not self.grid_container:
                 card.setParent(self.grid_container)
                 card.show()
-            card.move_to(QPoint(x0 + col * cell_w, row * cell_h), animate=reflowed)
+            card.move_to(QPoint(x0 + col * cell_w, GRID_TOP + row * cell_h), animate=reflowed)
         rows = -(-len(names) // columns) if names else 0
-        self.grid_container.setMinimumHeight(rows * cell_h)
+        self.grid_container.setMinimumHeight(GRID_TOP + rows * cell_h)
 
     def eventFilter(self, obj, event) -> bool:
         # The grid must follow the scroll viewport's real width (it is only
@@ -528,9 +728,7 @@ class MainWindow(QMainWindow):
         total = len(self.cards)
         selected = sum(1 for c in self.cards.values() if c.is_checked())
         processed = sum(1 for c in self.cards.values() if c.processed)
-        self.status_bar.showMessage(
-            f"{total} souborů · {selected} vybráno · {processed} zpracováno"
-        )
+        self.status_label.setText(f"{total} souborů · {selected} vybráno · {processed} zpracováno")
 
     # -- Processing -----------------------------------------------------
     def apply_to_selected(self) -> None:
@@ -575,17 +773,103 @@ class MainWindow(QMainWindow):
         self.refresh_files()
 
 
+MIN_SPLASH_MS = 1300
+STATE_PAUSE_MS = 500
+
+
+class StartupController:
+    """Splash -> update check -> (optional update) -> main window."""
+
+    def __init__(self, app: QApplication, splash: SplashScreen, update_url: str | None = None):
+        self.app = app
+        self.splash = splash
+        self.update_url = update_url
+        self.window: MainWindow | None = None
+        self._workers: list = []
+        self._info = None
+        self._clock = QElapsedTimer()
+        splash.update_accepted.connect(self._download)
+        splash.update_declined.connect(self._continue_to_app)
+
+    def start(self) -> None:
+        self._clock.start()
+        self.splash.set_status("Kontroluji aktualizace…")
+        self.splash.set_indeterminate()
+        worker = UpdateCheckWorker(self.update_url)
+        worker.result.connect(self._on_check)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_check(self, info, error: str) -> None:
+        wait = max(0, MIN_SPLASH_MS - self._clock.elapsed())
+        QTimer.singleShot(wait, lambda: self._after_check(info, error))
+
+    def _after_check(self, info, error: str) -> None:
+        if info is not None and can_self_update():
+            self._info = info
+            self.splash.show_update_prompt(info.version)
+            return
+        if error:
+            self.splash.set_status("Aktualizace se nepodařilo ověřit")
+        elif info is not None:
+            self.splash.set_status(f"Nová verze v{info.version} (aktualizace jen z instalace)")
+        else:
+            self.splash.set_status("Máte nejnovější verzi")
+        self.splash.set_progress(35)
+        QTimer.singleShot(STATE_PAUSE_MS, self._continue_to_app)
+
+    def _download(self) -> None:
+        self.splash.hide_update_prompt()
+        self.splash.set_status("Stahuji aktualizaci… 0 %")
+        self.splash.set_progress(0)
+        worker = DownloadWorker(self._info.url, self._info.size)
+        worker.progress.connect(self._on_progress)
+        worker.finished_ok.connect(self._on_downloaded)
+        worker.failed.connect(self._on_download_failed)
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_progress(self, percent: int) -> None:
+        self.splash.set_progress(percent)
+        self.splash.set_status(f"Stahuji aktualizaci… {percent} %")
+
+    def _on_downloaded(self, path: str) -> None:
+        self.splash.set_status("Instaluji aktualizaci…")
+        run_installer(path)
+        QTimer.singleShot(500, self.app.quit)
+
+    def _on_download_failed(self, message: str) -> None:
+        self.splash.set_status("Stažení selhalo, spouštím aktuální verzi")
+        self.splash.set_indeterminate()
+        QTimer.singleShot(1800, self._continue_to_app)
+
+    def _continue_to_app(self) -> None:
+        self.splash.hide_update_prompt()
+        self.splash.set_status("Načítám aplikaci…")
+        self.splash.set_progress(60)
+        self.app.processEvents()
+        self.window = MainWindow()
+        self.splash.set_progress(100)
+        self.splash.set_status("Hotovo")
+        QTimer.singleShot(STATE_PAUSE_MS, lambda: self.splash.finish(self._reveal))
+
+    def _reveal(self) -> None:
+        self.window.show()
+        enable_windows_acrylic_blur(int(self.window.winId()))
+        set_windows_titlebar(int(self.window.winId()))
+
+
 def run() -> None:
     import sys
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Photo Batch Editor")
+    app.setApplicationName(APP_NAME)
     app.setStyleSheet(STYLE_SHEET)
     icon_path = resource_path("icon.ico")
     if os.path.isfile(icon_path):
         app.setWindowIcon(QIcon(icon_path))
-    window = MainWindow()
-    window.show()
-    enable_windows_acrylic_blur(int(window.winId()))
-    set_windows_titlebar(int(window.winId()))
+    splash = SplashScreen(icon_path)
+    splash.show()
+    controller = StartupController(app, splash)
+    controller.start()
     sys.exit(app.exec())

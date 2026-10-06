@@ -282,8 +282,8 @@ def enable_windows_acrylic_blur(hwnd: int) -> bool:
 
 def set_windows_titlebar(
     hwnd: int,
-    caption_rgb: tuple[int, int, int] = (255, 255, 255),
-    text_rgb: tuple[int, int, int] = (0, 0, 0),
+    caption_rgb: tuple[int, int, int] = (0x24, 0x1b, 0x4e),
+    text_rgb: tuple[int, int, int] = (255, 255, 255),
 ) -> bool:
     """Colours the native title bar (Windows 11 only; a no-op elsewhere)."""
     if sys.platform != "win32":
@@ -304,8 +304,9 @@ def set_windows_titlebar(
         DWMWA_CAPTION_COLOR = 35
         DWMWA_TEXT_COLOR = 36
 
-        # Light caption => dark min/max/close glyphs.
-        set_attr(DWMWA_USE_IMMERSIVE_DARK_MODE, 0)
+        # Dark caption => light min/max/close glyphs (and the other way round).
+        luminance = 0.299 * caption_rgb[0] + 0.587 * caption_rgb[1] + 0.114 * caption_rgb[2]
+        set_attr(DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if luminance < 128 else 0)
         ok = set_attr(DWMWA_CAPTION_COLOR, colorref(caption_rgb)) == 0
         set_attr(DWMWA_TEXT_COLOR, colorref(text_rgb))
         set_attr(DWMWA_BORDER_COLOR, -2)  # DWMWA_COLOR_NONE: no coloured frame
