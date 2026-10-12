@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Callable
 
 from PySide6.QtCore import (
@@ -480,6 +481,38 @@ class ProcessWorker(QThread):
         self.finished_all.emit()
 
 
+def _unique_path(folder: str, filename: str) -> str:
+    """folder/filename, or folder/name (2).ext etc. if it already exists."""
+    stem, ext = os.path.splitext(filename)
+    path = os.path.join(folder, filename)
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(folder, f"{stem} ({n}){ext}")
+        n += 1
+    return path
+
+
+class ExportWorker(QThread):
+    progress = Signal(str, bool, str)  # filename, success, new_path_or_error
+    finished_all = Signal()
+
+    def __init__(self, folder: str, filenames: list[str], target: str):
+        super().__init__()
+        self.folder = folder
+        self.filenames = filenames
+        self.target = target
+
+    def run(self) -> None:
+        for filename in self.filenames:
+            try:
+                dest = _unique_path(self.target, filename)
+                shutil.copy2(os.path.join(self.folder, filename), dest)
+                self.progress.emit(filename, True, dest)
+            except Exception as exc:  # noqa: BLE001
+                self.progress.emit(filename, False, str(exc))
+        self.finished_all.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -497,6 +530,10 @@ class MainWindow(QMainWindow):
         self.watcher = FolderWatcher()
         self.watcher.changed.connect(self.refresh_files)
         self.worker: ProcessWorker | None = None
+        self.export_worker: ExportWorker | None = None
+        self.export_folder: str = self.settings.value("export_folder", "", type=str)
+        self._export_errors: list[str] = []
+        self._export_count = 0
 
         self._build_ui()
         QShortcut(QKeySequence.SelectAll, self, activated=self.select_all)
@@ -614,6 +651,30 @@ class MainWindow(QMainWindow):
         self.reset_processed_btn.clicked.connect(self.reset_processed_marks)
         layout.addWidget(self.reset_processed_btn)
 
+        layout.addSpacing(18)
+        export_title = QLabel("Export")
+        export_title.setObjectName("Title")
+        layout.addWidget(export_title)
+
+        export_row = QHBoxLayout()
+        export_row.setSpacing(8)
+        self.export_folder_edit = QLineEdit()
+        self.export_folder_edit.setReadOnly(True)
+        self.export_folder_edit.setPlaceholderText("Cílová složka")
+        self.export_folder_edit.setText(self.export_folder)
+        self.export_folder_edit.setToolTip(self.export_folder)
+        export_row.addWidget(self.export_folder_edit, stretch=1)
+        self.export_choose_btn = QPushButton("…")
+        self.export_choose_btn.setFixedWidth(40)
+        self.export_choose_btn.setToolTip("Vybrat cílovou složku")
+        self.export_choose_btn.clicked.connect(self.choose_export_folder)
+        export_row.addWidget(self.export_choose_btn)
+        layout.addLayout(export_row)
+
+        self.export_btn = QPushButton("Odeslat vybrané")
+        self.export_btn.clicked.connect(self.export_selected)
+        layout.addWidget(self.export_btn)
+
         layout.addStretch(1)
         return ops_panel
 
@@ -729,6 +790,62 @@ class MainWindow(QMainWindow):
         selected = sum(1 for c in self.cards.values() if c.is_checked())
         processed = sum(1 for c in self.cards.values() if c.processed)
         self.status_label.setText(f"{total} souborů · {selected} vybráno · {processed} zpracováno")
+
+    # -- Export ---------------------------------------------------------
+    def choose_export_folder(self) -> None:
+        start = self.export_folder if os.path.isdir(self.export_folder) else (self.folder or "")
+        folder = QFileDialog.getExistingDirectory(self, "Vybrat cílovou složku exportu", start)
+        if not folder:
+            return
+        self.export_folder = folder
+        self.settings.setValue("export_folder", folder)
+        self.export_folder_edit.setText(folder)
+        self.export_folder_edit.setToolTip(folder)
+
+    def export_selected(self) -> None:
+        if not self.folder:
+            QMessageBox.information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
+            return
+        selected = [name for name, card in self.cards.items() if card.is_checked()]
+        if not selected:
+            QMessageBox.information(self, "Žádný výběr", "Vyberte alespoň jednu fotku.")
+            return
+        if not self.export_folder:
+            self.choose_export_folder()
+            if not self.export_folder:
+                return
+        if not os.path.isdir(self.export_folder):
+            QMessageBox.warning(self, "Cílová složka neexistuje", self.export_folder)
+            return
+        if os.path.normcase(os.path.abspath(self.export_folder)) == os.path.normcase(os.path.abspath(self.folder)):
+            QMessageBox.information(self, "Stejná složka", "Cílová složka je stejná jako zdrojová.")
+            return
+
+        self._export_errors = []
+        self._export_count = 0
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText("Odesílám…")
+        self.export_worker = ExportWorker(self.folder, selected, self.export_folder)
+        self.export_worker.progress.connect(self._on_file_exported)
+        self.export_worker.finished_all.connect(self._on_export_finished)
+        self.export_worker.start()
+
+    def _on_file_exported(self, filename: str, success: bool, info: str) -> None:
+        if success:
+            self._export_count += 1
+        else:
+            self._export_errors.append(f"{filename}: {info}")
+
+    def _on_export_finished(self) -> None:
+        self.export_btn.setEnabled(True)
+        self.export_btn.setText("Odeslat vybrané")
+        if self._export_errors:
+            QMessageBox.warning(
+                self, "Export dokončen s chybami",
+                f"Odesláno: {self._export_count}\n\n" + "\n".join(self._export_errors),
+            )
+        else:
+            self.status_label.setText(f"Odesláno {self._export_count} souborů do {self.export_folder}")
 
     # -- Processing -----------------------------------------------------
     def apply_to_selected(self) -> None:
