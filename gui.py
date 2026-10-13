@@ -4,11 +4,11 @@ import os
 from typing import Callable
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QSize, QSettings, QRect, QRectF, QPoint, QPointF, QEvent,
+    Qt, QThread, Signal, QObject, QRunnable, QThreadPool, QSize, QSettings, QRect, QRectF, QPoint, QPointF, QEvent,
     QPropertyAnimation, QEasingCurve, QTimer, QElapsedTimer,
 )
 from PySide6.QtGui import (
-    QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QCursor,
+    QImage, QImageReader, QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QCursor,
     QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -96,6 +96,48 @@ def _selection_gradient(rect, alpha: int) -> QLinearGradient:
     return grad
 
 
+_thumb_pool = QThreadPool()
+_thumb_pool.setMaxThreadCount(max(2, min(8, (os.cpu_count() or 4))))
+
+
+def _file_stamp(path: str) -> tuple[float, int] | None:
+    try:
+        st = os.stat(path)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+class _ThumbSignals(QObject):
+    done = Signal(int, QImage, object)  # generation, image (null on failure), stamp
+
+
+class _ThumbJob(QRunnable):
+    """Decodes a thumbnail off the GUI thread. The reader decodes straight to
+    the target size (JPEG shrinks during decoding), so even big photos are fast."""
+
+    def __init__(self, path: str, generation: int, signals: _ThumbSignals):
+        super().__init__()
+        self.path = path
+        self.generation = generation
+        self.signals = signals
+
+    def run(self) -> None:
+        stamp = _file_stamp(self.path)
+        image = QImage()
+        if stamp is not None:
+            reader = QImageReader(self.path)
+            size = reader.size()
+            if size.isValid() and size.width() > 0 and size.height() > 0:
+                size.scale(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio)
+                reader.setScaledSize(size)
+            image = reader.read()
+        try:
+            self.signals.done.emit(self.generation, image, stamp)
+        except RuntimeError:  # the card was deleted while loading
+            pass
+
+
 class ThumbnailCard(QWidget):
     """Clickable thumbnail painted by hand: the full image with square
     corners, a gradient glow when selected and a processed badge,
@@ -115,47 +157,44 @@ class ThumbnailCard(QWidget):
         self._placed = False
         self._anim: QPropertyAnimation | None = None
         self._retries = 0
-        self._recheck_timer = QTimer(self)
-        self._recheck_timer.setSingleShot(True)
-        self._recheck_timer.timeout.connect(self._recheck)
+        self._generation = 0
+        self._loading = False
+        self._signals = _ThumbSignals(self)
+        self._signals.done.connect(self._on_loaded)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._request_load)
         self.setFixedSize(THUMB_SIZE + CARD_PAD * 2, THUMB_SIZE + CARD_PAD * 2 + NAME_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_Hover, True)
         self.setToolTip(filename)
-        self._load_thumbnail()
+        self._request_load()
 
     @property
     def _path(self) -> str:
         return os.path.join(self.folder, self.filename)
 
-    def _file_stamp(self) -> tuple[float, int] | None:
-        try:
-            st = os.stat(self._path)
-            return (st.st_mtime, st.st_size)
-        except OSError:
-            return None
+    def _request_load(self) -> None:
+        self._generation += 1
+        self._loading = True
+        _thumb_pool.start(_ThumbJob(self._path, self._generation, self._signals))
 
-    def _load_thumbnail(self) -> None:
-        self._stamp = self._file_stamp()
-        self._pixmap = None
-        pixmap = QPixmap(self._path)
-        if not pixmap.isNull():
-            self._pixmap = pixmap.scaled(
-                THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-        # A file that was just copied in may still be locked or half written,
-        # so look again shortly until it loads and its size/mtime stop changing.
-        if self._pixmap is not None or self._retries < 60:
-            self._retries += 1
-            self._recheck_timer.start(800)
-
-    def _recheck(self) -> None:
-        stamp = self._file_stamp()
-        if stamp is None:
-            return
-        if self._pixmap is None or stamp != self._stamp:
-            self._load_thumbnail()
+    def _on_loaded(self, generation: int, image: QImage, stamp) -> None:
+        if generation != self._generation:
+            return  # superseded by a newer request
+        self._loading = False
+        if not image.isNull():
+            self._pixmap = QPixmap.fromImage(image)
+            self._stamp = stamp
             self.update()
+        # A file that was just copied in may still be locked or half written:
+        # if it failed to load, or changed while we read it, look again shortly.
+        changed = _file_stamp(self._path) != stamp
+        if (image.isNull() or changed) and self._retries < 60:
+            self._retries += 1
+            self._retry_timer.start(250)
+        else:
+            self._retries = 0
 
     def move_to(self, target: QPoint, animate: bool) -> None:
         if self._anim is not None and self._anim.state() == QPropertyAnimation.Running:
@@ -174,10 +213,9 @@ class ThumbnailCard(QWidget):
         self._placed = True
 
     def reload_if_changed(self) -> None:
-        if self._file_stamp() != self._stamp:
+        if not self._loading and _file_stamp(self._path) != self._stamp:
             self._retries = 0
-            self._load_thumbnail()
-            self.update()
+            self._request_load()
 
     def _image_rect(self) -> QRect:
         if self._pixmap is None:
@@ -220,7 +258,7 @@ class ThumbnailCard(QWidget):
             painter.drawPixmap(rect.topLeft(), self._pixmap)
         else:
             painter.setPen(QColor(120, 120, 140))
-            painter.drawText(rect, Qt.AlignCenter, "?")
+            painter.drawText(rect, Qt.AlignCenter, "…" if self._loading or self._retries else "?")
 
         if self.selected:
             painter.setBrush(Qt.NoBrush)
@@ -486,7 +524,11 @@ class MainWindow(QMainWindow):
         self.cards: dict[str, ThumbnailCard] = {}
         self._columns = 0
         self.watcher = FolderWatcher()
-        self.watcher.changed.connect(self.refresh_files)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(60)  # coalesce bursts of events
+        self._refresh_timer.timeout.connect(self.refresh_files)
+        self.watcher.changed.connect(self._refresh_timer.start)
         self.worker: ProcessWorker | None = None
         self.export_worker: ExportWorker | None = None
         self.export_folder: str = self.settings.value("export_folder", "", type=str)
@@ -771,6 +813,7 @@ class MainWindow(QMainWindow):
             if new_name != filename:
                 self.state.rename(filename, new_name)
             self.state.mark_processed(new_name)
+        self.refresh_files()
 
     def _on_processing_finished(self) -> None:
         self.sidebar.set_processing(False)

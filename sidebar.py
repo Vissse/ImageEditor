@@ -5,14 +5,15 @@ holds the logic and this file holds the layout.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRectF, QSize, Qt, Signal, Property
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from core.processing import Operations
+from style import ACCENT_COLOR
 
 PANEL_WIDTH = 300
 
@@ -23,6 +24,77 @@ def glass_shadow(blur: int = 24, alpha: int = 90, y_offset: int = 6) -> QGraphic
     effect.setOffset(0, y_offset)
     effect.setColor(QColor(0, 0, 0, alpha))
     return effect
+
+
+class ToggleSwitch(QCheckBox):
+    """A checkbox drawn as a label on the left and a sliding switch on the
+    right. Behaves like a normal QCheckBox (isChecked, setChecked, toggled)."""
+
+    TRACK_W, TRACK_H, KNOB_PAD = 38, 22, 3
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self._pos = 0.0
+        self._anim = QPropertyAnimation(self, b"knob", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.setCursor(Qt.PointingHandCursor)
+        self.toggled.connect(self._animate)
+
+    def _animate(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def get_knob(self) -> float:
+        return self._pos
+
+    def set_knob(self, value: float) -> None:
+        self._pos = value
+        self.update()
+
+    knob = Property(float, get_knob, set_knob)
+
+    def setChecked(self, checked: bool) -> None:
+        super().setChecked(checked)
+        self._pos = 1.0 if checked else 0.0
+
+    def sizeHint(self) -> QSize:
+        return QSize(220, max(30, self.TRACK_H + 8))
+
+    def hitButton(self, pos) -> bool:
+        return self.rect().contains(pos)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        enabled = self.isEnabled()
+        h = self.height()
+        track = QRectF(self.width() - self.TRACK_W, (h - self.TRACK_H) / 2, self.TRACK_W, self.TRACK_H)
+
+        off = QColor(255, 255, 255, 40)
+        on = QColor(ACCENT_COLOR)
+        t = self._pos
+        color = QColor(
+            round(off.red() + (on.red() - off.red()) * t),
+            round(off.green() + (on.green() - off.green()) * t),
+            round(off.blue() + (on.blue() - off.blue()) * t),
+            round(off.alpha() + (255 - off.alpha()) * t),
+        )
+        if not enabled:
+            color.setAlpha(int(color.alpha() * 0.65))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(track, self.TRACK_H / 2, self.TRACK_H / 2)
+
+        d = self.TRACK_H - 2 * self.KNOB_PAD
+        x = track.left() + self.KNOB_PAD + (self.TRACK_W - 2 * self.KNOB_PAD - d) * t
+        painter.setBrush(QColor(255, 255, 255, 255 if enabled else 200))
+        painter.drawEllipse(QRectF(x, track.top() + self.KNOB_PAD, d, d))
+
+        painter.setPen(QColor(241, 240, 250, 235 if enabled else 190))
+        text_rect = QRectF(0, 0, track.left() - 10, h)
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
 
 
 class Section(QFrame):
@@ -97,12 +169,12 @@ class SidebarPanel(QFrame):
     # -- sections ---------------------------------------------------------
     def _build_operations(self) -> Section:
         section = Section("Operace")
-        self.op_resize = QCheckBox("Změnit velikost na 1024 px")
+        self.op_resize = ToggleSwitch("Velikost 1024 px")
         self.op_resize.setChecked(True)
         self.op_resize.setEnabled(False)
         self.op_resize.setToolTip("Vždy zapnuto")
-        self.op_border = QCheckBox("Přidat černý rámeček (1 px)")
-        self.op_jpeg = QCheckBox("Převést na JPEG")
+        self.op_border = ToggleSwitch("Černý rámeček (1 px)")
+        self.op_jpeg = ToggleSwitch("Převést na JPEG")
         for box in (self.op_resize, self.op_border, self.op_jpeg):
             section.body.addWidget(box)
 
