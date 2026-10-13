@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from typing import Callable
 
 from PySide6.QtCore import (
@@ -19,15 +18,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
-    QCheckBox,
     QLabel,
     QLineEdit,
     QScrollArea,
     QFrame,
     QFileDialog,
-    QSizePolicy,
     QMessageBox,
-    QGraphicsDropShadowEffect,
 )
 
 from core.processing import Operations, process_file, SUPPORTED_EXTENSIONS
@@ -38,6 +34,8 @@ from core.updater import (
 from splash import SplashScreen
 from preview import PreviewDialog
 from core.state import FolderState
+from core.export import ExportWorker, same_folder
+from sidebar import SidebarPanel, glass_shadow
 from core.watcher import FolderWatcher
 from style import (
     STYLE_SHEET, enable_windows_acrylic_blur, set_windows_titlebar,
@@ -72,14 +70,6 @@ def list_images(folder: str) -> list[str]:
     ]
     files.sort(key=str.lower)
     return files
-
-
-def _glass_shadow(blur: int = 24, alpha: int = 90, y_offset: int = 6) -> QGraphicsDropShadowEffect:
-    effect = QGraphicsDropShadowEffect()
-    effect.setBlurRadius(blur)
-    effect.setOffset(0, y_offset)
-    effect.setColor(QColor(0, 0, 0, alpha))
-    return effect
 
 
 _SELECT_STOPS = (QColor("#3fa9f5"), QColor(ACCENT_COLOR), QColor("#ff9f5a"))
@@ -481,38 +471,6 @@ class ProcessWorker(QThread):
         self.finished_all.emit()
 
 
-def _unique_path(folder: str, filename: str) -> str:
-    """folder/filename, or folder/name (2).ext etc. if it already exists."""
-    stem, ext = os.path.splitext(filename)
-    path = os.path.join(folder, filename)
-    n = 2
-    while os.path.exists(path):
-        path = os.path.join(folder, f"{stem} ({n}){ext}")
-        n += 1
-    return path
-
-
-class ExportWorker(QThread):
-    progress = Signal(str, bool, str)  # filename, success, new_path_or_error
-    finished_all = Signal()
-
-    def __init__(self, folder: str, filenames: list[str], target: str):
-        super().__init__()
-        self.folder = folder
-        self.filenames = filenames
-        self.target = target
-
-    def run(self) -> None:
-        for filename in self.filenames:
-            try:
-                dest = _unique_path(self.target, filename)
-                shutil.copy2(os.path.join(self.folder, filename), dest)
-                self.progress.emit(filename, True, dest)
-            except Exception as exc:  # noqa: BLE001
-                self.progress.emit(filename, False, str(exc))
-        self.finished_all.emit()
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -553,7 +511,7 @@ class MainWindow(QMainWindow):
         root.addLayout(columns, stretch=1)
 
         columns.addWidget(self._build_folder_panel(), stretch=3)
-        columns.addWidget(self._build_options_panel(), stretch=0)
+        columns.addWidget(self._build_sidebar(), stretch=0)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(6, 0, 6, 0)
@@ -570,7 +528,7 @@ class MainWindow(QMainWindow):
     def _build_folder_panel(self) -> QFrame:
         folder_panel = SelectionPanel()
         folder_panel.setObjectName("GlassPanel")
-        folder_panel.setGraphicsEffect(_glass_shadow())
+        folder_panel.setGraphicsEffect(glass_shadow())
         layout = QVBoxLayout(folder_panel)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
@@ -605,78 +563,15 @@ class MainWindow(QMainWindow):
 
         return folder_panel
 
-    def _build_options_panel(self) -> QFrame:
-        ops_panel = QFrame()
-        ops_panel.setObjectName("GlassPanel")
-        ops_panel.setFixedWidth(300)
-        ops_panel.setGraphicsEffect(_glass_shadow())
-        layout = QVBoxLayout(ops_panel)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
-
-        ops_title = QLabel("Operace")
-        ops_title.setObjectName("Title")
-        layout.addWidget(ops_title)
-
-        self.op_resize = QCheckBox("Změnit velikost na 1024 px")
-        self.op_resize.setChecked(True)
-        self.op_resize.setEnabled(False)
-        self.op_resize.setToolTip("Vždy zapnuto")
-        self.op_border = QCheckBox("Přidat černý rámeček (1 px)")
-        self.op_jpeg = QCheckBox("Převést na JPEG")
-        layout.addWidget(self.op_resize)
-        layout.addWidget(self.op_border)
-        layout.addWidget(self.op_jpeg)
-        self.apply_btn = QPushButton("Zpracovat vybrané")
-        self.apply_btn.setObjectName("PrimaryButton")
-        self.apply_btn.setGraphicsEffect(_glass_shadow(blur=28, alpha=110, y_offset=4))
-        self.apply_btn.clicked.connect(self.apply_to_selected)
-        layout.addSpacing(6)
-        layout.addWidget(self.apply_btn)
-
-        layout.addSpacing(18)
-        selection_title = QLabel("Výběr")
-        selection_title.setObjectName("Title")
-        layout.addWidget(selection_title)
-
-        self.select_all_btn = QPushButton("Vybrat vše")
-        self.select_all_btn.clicked.connect(self.select_all)
-        layout.addWidget(self.select_all_btn)
-
-        self.select_none_btn = QPushButton("Zrušit výběr")
-        self.select_none_btn.clicked.connect(self.select_none)
-        layout.addWidget(self.select_none_btn)
-
-        self.reset_processed_btn = QPushButton("Vymazat značky zpracování")
-        self.reset_processed_btn.clicked.connect(self.reset_processed_marks)
-        layout.addWidget(self.reset_processed_btn)
-
-        layout.addSpacing(18)
-        export_title = QLabel("Export")
-        export_title.setObjectName("Title")
-        layout.addWidget(export_title)
-
-        export_row = QHBoxLayout()
-        export_row.setSpacing(8)
-        self.export_folder_edit = QLineEdit()
-        self.export_folder_edit.setReadOnly(True)
-        self.export_folder_edit.setPlaceholderText("Cílová složka")
-        self.export_folder_edit.setText(self.export_folder)
-        self.export_folder_edit.setToolTip(self.export_folder)
-        export_row.addWidget(self.export_folder_edit, stretch=1)
-        self.export_choose_btn = QPushButton("…")
-        self.export_choose_btn.setFixedWidth(40)
-        self.export_choose_btn.setToolTip("Vybrat cílovou složku")
-        self.export_choose_btn.clicked.connect(self.choose_export_folder)
-        export_row.addWidget(self.export_choose_btn)
-        layout.addLayout(export_row)
-
-        self.export_btn = QPushButton("Odeslat vybrané")
-        self.export_btn.clicked.connect(self.export_selected)
-        layout.addWidget(self.export_btn)
-
-        layout.addStretch(1)
-        return ops_panel
+    def _build_sidebar(self) -> SidebarPanel:
+        self.sidebar = SidebarPanel(self.export_folder)
+        self.sidebar.process_requested.connect(self.apply_to_selected)
+        self.sidebar.select_all_requested.connect(self.select_all)
+        self.sidebar.select_none_requested.connect(self.select_none)
+        self.sidebar.clear_marks_requested.connect(self.reset_processed_marks)
+        self.sidebar.choose_export_folder_requested.connect(self.choose_export_folder)
+        self.sidebar.export_requested.connect(self.export_selected)
+        return self.sidebar
 
     # -- Folder handling ---------------------------------------------------
     def choose_folder(self) -> None:
@@ -790,6 +685,7 @@ class MainWindow(QMainWindow):
         selected = sum(1 for c in self.cards.values() if c.is_checked())
         processed = sum(1 for c in self.cards.values() if c.processed)
         self.status_label.setText(f"{total} souborů · {selected} vybráno · {processed} zpracováno")
+        self.sidebar.set_selected_count(selected)
 
     # -- Export ---------------------------------------------------------
     def choose_export_folder(self) -> None:
@@ -799,8 +695,7 @@ class MainWindow(QMainWindow):
             return
         self.export_folder = folder
         self.settings.setValue("export_folder", folder)
-        self.export_folder_edit.setText(folder)
-        self.export_folder_edit.setToolTip(folder)
+        self.sidebar.set_export_folder(folder)
 
     def export_selected(self) -> None:
         if not self.folder:
@@ -817,14 +712,13 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(self.export_folder):
             QMessageBox.warning(self, "Cílová složka neexistuje", self.export_folder)
             return
-        if os.path.normcase(os.path.abspath(self.export_folder)) == os.path.normcase(os.path.abspath(self.folder)):
+        if same_folder(self.export_folder, self.folder):
             QMessageBox.information(self, "Stejná složka", "Cílová složka je stejná jako zdrojová.")
             return
 
         self._export_errors = []
         self._export_count = 0
-        self.export_btn.setEnabled(False)
-        self.export_btn.setText("Odesílám…")
+        self.sidebar.set_exporting(True)
         self.export_worker = ExportWorker(self.folder, selected, self.export_folder)
         self.export_worker.progress.connect(self._on_file_exported)
         self.export_worker.finished_all.connect(self._on_export_finished)
@@ -837,8 +731,7 @@ class MainWindow(QMainWindow):
             self._export_errors.append(f"{filename}: {info}")
 
     def _on_export_finished(self) -> None:
-        self.export_btn.setEnabled(True)
-        self.export_btn.setText("Odeslat vybrané")
+        self.sidebar.set_exporting(False)
         if self._export_errors:
             QMessageBox.warning(
                 self, "Export dokončen s chybami",
@@ -853,11 +746,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
             return
 
-        ops = Operations(
-            resize=True,
-            border=self.op_border.isChecked(),
-            to_jpeg=self.op_jpeg.isChecked(),
-        )
+        ops = self.sidebar.operations()
         if not ops.any:
             QMessageBox.information(self, "Žádná akce", "Zaškrtněte alespoň jednu operaci.")
             return
@@ -867,8 +756,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Žádný výběr", "Vyberte alespoň jednu fotku.")
             return
 
-        self.apply_btn.setEnabled(False)
-        self.apply_btn.setText("Zpracovávám…")
+        self.sidebar.set_processing(True)
         self.worker = ProcessWorker(self.folder, selected, ops)
         self.worker.progress.connect(self._on_file_processed)
         self.worker.finished_all.connect(self._on_processing_finished)
@@ -885,8 +773,7 @@ class MainWindow(QMainWindow):
             self.state.mark_processed(new_name)
 
     def _on_processing_finished(self) -> None:
-        self.apply_btn.setEnabled(True)
-        self.apply_btn.setText("Zpracovat vybrané")
+        self.sidebar.set_processing(False)
         self.refresh_files()
 
 

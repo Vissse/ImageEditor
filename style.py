@@ -115,6 +115,58 @@ QPushButton#PrimaryButton:disabled {{
     color: rgba(255, 255, 255, 130);
 }}
 
+QPushButton#AccentButton {{
+    background-color: rgba(127, 90, 240, 70);
+    border: 1px solid rgba(127, 90, 240, 190);
+}}
+
+QPushButton#AccentButton:hover {{
+    background-color: rgba(127, 90, 240, 120);
+}}
+
+QPushButton#AccentButton:disabled {{
+    background-color: rgba(255, 255, 255, 12);
+    border: 1px solid rgba(255, 255, 255, 40);
+}}
+
+QPushButton#GhostButton {{
+    background: transparent;
+    border: none;
+    color: rgba(241, 240, 250, 170);
+    font-weight: 400;
+    padding: 4px 8px;
+}}
+
+QPushButton#GhostButton:hover {{
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 18);
+}}
+
+QFrame#Section {{
+    background-color: rgba(255, 255, 255, 14);
+    border: 1px solid rgba(255, 255, 255, 34);
+    border-radius: 12px;
+}}
+
+QLabel#SectionTitle {{
+    font-size: 11px;
+    font-weight: 700;
+    color: rgba(241, 240, 250, 150);
+}}
+
+QLabel#Badge {{
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 9px;
+    background-color: rgba(255, 255, 255, 22);
+    color: rgba(241, 240, 250, 170);
+}}
+
+QLabel#Badge[active="true"] {{
+    background-color: rgba(127, 90, 240, 150);
+    color: #ffffff;
+}}
+
 QCheckBox {{
     spacing: 8px;
     background: transparent;
