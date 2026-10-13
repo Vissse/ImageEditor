@@ -214,7 +214,8 @@ class SidebarPanel(QFrame):
         row.addWidget(choose)
         section.body.addLayout(row)
 
-        self.export_btn = _button(self.EXPORT_TEXT, self.export_requested.emit, "AccentButton")
+        self.export_btn = _button(self.EXPORT_TEXT, self.export_requested.emit, "AccentButton",
+                                  "Přesune vybrané fotky do cílové složky (ze zdrojové zmizí)")
         section.body.addWidget(self.export_btn)
 
         self.set_export_folder(export_folder)

@@ -769,6 +769,8 @@ class MainWindow(QMainWindow):
     def _on_file_exported(self, filename: str, success: bool, info: str) -> None:
         if success:
             self._export_count += 1
+            if self.state:
+                self.state.forget(filename)
         else:
             self._export_errors.append(f"{filename}: {info}")
 
@@ -777,10 +779,10 @@ class MainWindow(QMainWindow):
         if self._export_errors:
             QMessageBox.warning(
                 self, "Export dokončen s chybami",
-                f"Odesláno: {self._export_count}\n\n" + "\n".join(self._export_errors),
+                f"Přesunuto: {self._export_count}\n\n" + "\n".join(self._export_errors),
             )
         else:
-            self.status_label.setText(f"Odesláno {self._export_count} souborů do {self.export_folder}")
+            self.status_label.setText(f"Přesunuto {self._export_count} souborů do {self.export_folder}")
 
     # -- Processing -----------------------------------------------------
     def apply_to_selected(self) -> None:

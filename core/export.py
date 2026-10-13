@@ -1,4 +1,4 @@
-"""Copying selected photos into another folder."""
+"""Moving selected photos into another folder."""
 from __future__ import annotations
 
 import os
@@ -36,7 +36,8 @@ class ExportWorker(QThread):
         for filename in self.filenames:
             try:
                 dest = unique_path(self.target, filename)
-                shutil.copy2(os.path.join(self.folder, filename), dest)
+                # move = copy, then remove the source only after the copy succeeded
+                shutil.move(os.path.join(self.folder, filename), dest)
                 self.progress.emit(filename, True, dest)
             except Exception as exc:  # noqa: BLE001
                 self.progress.emit(filename, False, str(exc))
