@@ -65,8 +65,11 @@ class PreviewDialog(QDialog):
         self.setModal(True)
 
         screen = (parent.screen() if parent is not None else QApplication.primaryScreen()).availableGeometry()
-        max_w = int(screen.width() * 0.78) - 2 * PLATE_PADDING
-        max_h = int(screen.height() * 0.74) - 2 * PLATE_PADDING
+        # The dialog covers the whole parent window (dimmed), so a click anywhere
+        # outside the panel lands on the dialog itself and can close it.
+        area = parent.frameGeometry() if parent is not None else screen
+        max_w = int(min(screen.width() * 0.78, area.width() * 0.9)) - 2 * PLATE_PADDING
+        max_h = int(min(screen.height() * 0.74, area.height() * 0.85)) - 2 * PLATE_PADDING
 
         reader = QImageReader(path)
         reader.setAutoTransform(True)
@@ -84,7 +87,9 @@ class PreviewDialog(QDialog):
         self._shadow.setOffset(0, 10)
         self._shadow.setColor(QColor(0, 0, 0, 170))
         panel.setGraphicsEffect(self._shadow)
-        outer.addWidget(panel)
+        outer.addStretch(1)
+        outer.addWidget(panel, alignment=Qt.AlignCenter)
+        outer.addStretch(1)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 14, 20, 20)
@@ -107,16 +112,20 @@ class PreviewDialog(QDialog):
         else:
             layout.addWidget(_Plate(pixmap), alignment=Qt.AlignCenter)
 
-        self.adjustSize()
         if parent is not None:
-            center = parent.frameGeometry().center()
-            self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+            self.setGeometry(parent.frameGeometry())
+        else:
+            self.adjustSize()
 
         self.setWindowOpacity(0.0)
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(180)
         self._fade.setStartValue(0.0)
         self._fade.setEndValue(1.0)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(8, 6, 24, 140))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
