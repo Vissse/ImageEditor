@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Callable
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QObject, QRunnable, QThreadPool, QSize, QSettings, QRect, QRectF, QPoint, QPointF, QEvent,
+    QFile, Qt, QThread, Signal, QObject, QRunnable, QThreadPool, QSize, QSettings, QRect, QRectF, QPoint, QPointF, QEvent,
     QPropertyAnimation, QEasingCurve, QTimer, QElapsedTimer,
 )
 from PySide6.QtGui import (
-    QImage, QImageReader, QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QCursor,
+    QImage, QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QCursor,
     QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -23,18 +24,21 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QFileDialog,
-    QMessageBox,
 )
 
 from core.processing import Operations, process_file, SUPPORTED_EXTENSIONS
+from core.qimage import read_image
 from core.config import CURRENT_VERSION, APP_NAME
 from core.updater import (
     UpdateCheckWorker, DownloadWorker, run_installer, can_self_update,
 )
 from splash import SplashScreen
 from preview import PreviewDialog
-from core.state import FolderState
-from core.export import ExportWorker, same_folder
+from dialogs import confirm, information, toast, warning, whats_new
+from core.changelog import CHANGELOG, changes_since
+from core.undo import UndoStack, UndoStep
+from core.state import FolderState, OPERATION_DESCRIPTIONS, OPERATION_LABELS
+from core.export import ExportWorker, same_folder, unique_path
 from sidebar import SidebarPanel, glass_shadow
 from core.watcher import FolderWatcher
 from style import (
@@ -70,6 +74,30 @@ def list_images(folder: str) -> list[str]:
     ]
     files.sort(key=str.lower)
     return files
+
+
+def list_subfolders(folder: str) -> list[str]:
+    """Subfolders that hold at least one image (e.g. the pages of a PDF)."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(
+        (n for n in names if not n.startswith(".") and os.path.isdir(os.path.join(folder, n))
+         and list_images(os.path.join(folder, n))),
+        key=str.lower,
+    )
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Czech plural: 1 soubor, 2 soubory, 5 souborů."""
+    return f"{count} {one if count == 1 else few if 2 <= count <= 4 else many}"
+
+
+def _images_word(count: int) -> str:
+    if count == 1:
+        return "obrázek"
+    return "obrázky" if 2 <= count <= 4 else "obrázků"
 
 
 _SELECT_STOPS = (QColor("#3fa9f5"), QColor(ACCENT_COLOR), QColor("#ff9f5a"))
@@ -126,12 +154,7 @@ class _ThumbJob(QRunnable):
         stamp = _file_stamp(self.path)
         image = QImage()
         if stamp is not None:
-            reader = QImageReader(self.path)
-            size = reader.size()
-            if size.isValid() and size.width() > 0 and size.height() > 0:
-                size.scale(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio)
-                reader.setScaledSize(size)
-            image = reader.read()
+            image = read_image(self.path, QSize(THUMB_SIZE, THUMB_SIZE), upscale=True)
         try:
             self.signals.done.emit(self.generation, image, stamp)
         except RuntimeError:  # the card was deleted while loading
@@ -149,7 +172,9 @@ class ThumbnailCard(QWidget):
         super().__init__()
         self.folder = folder
         self.filename = filename
+        self.display_name = filename
         self.processed = processed
+        self.operations: list[str] = []
         self.selected = False
         self._hovered = False
         self._pixmap: QPixmap | None = None
@@ -217,11 +242,24 @@ class ThumbnailCard(QWidget):
             self._retries = 0
             self._request_load()
 
+    def _image_area(self) -> QRect:
+        """The square the image is fitted into."""
+        return QRect(CARD_PAD, CARD_PAD, THUMB_SIZE, THUMB_SIZE)
+
     def _image_rect(self) -> QRect:
+        area = self._image_area()
         if self._pixmap is None:
-            return QRect(CARD_PAD, CARD_PAD, THUMB_SIZE, THUMB_SIZE)
-        w, h = self._pixmap.width(), self._pixmap.height()
-        return QRect(CARD_PAD + (THUMB_SIZE - w) // 2, CARD_PAD + (THUMB_SIZE - h) // 2, w, h)
+            return area
+        size = self._pixmap.size()
+        if size.width() > area.width() or size.height() > area.height():
+            size = size.scaled(area.size(), Qt.KeepAspectRatio)
+        # centred horizontally, sitting on the bottom edge: plates and names
+        # in a row line up even when portraits and landscapes are mixed
+        return QRect(
+            area.left() + (area.width() - size.width()) // 2,
+            area.bottom() + 1 - size.height(),
+            size.width(), size.height(),
+        )
 
     @staticmethod
     def _gradient(rect: QRect, alpha: int) -> QLinearGradient:
@@ -249,13 +287,14 @@ class ThumbnailCard(QWidget):
             self._paint_glow(painter, plate, spread=CARD_PAD - PLATE - 1, peak=115, gradient=True)
         elif self._hovered:
             self._paint_glow(painter, plate, spread=8, peak=50, gradient=False)
+        self._paint_behind(painter, plate)
 
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255))
         painter.drawRoundedRect(plate, PLATE_RADIUS, PLATE_RADIUS)
 
         if self._pixmap is not None:
-            painter.drawPixmap(rect.topLeft(), self._pixmap)
+            painter.drawPixmap(rect, self._pixmap)
         else:
             painter.setPen(QColor(120, 120, 140))
             painter.drawText(rect, Qt.AlignCenter, "…" if self._loading or self._retries else "?")
@@ -277,20 +316,54 @@ class ThumbnailCard(QWidget):
                 QPoint(badge.left() + 15, badge.top() + 6),
             ])
 
+        if self.processed and self.operations:
+            self._paint_operations(painter, rect)
+
+        self._paint_overlay(painter, rect)
+
         name_rect = QRect(2, THUMB_SIZE + CARD_PAD * 2 - 8, self.width() - 4, NAME_HEIGHT)
         painter.setPen(QColor(241, 240, 250, 175))
         font = painter.font()
         font.setPixelSize(11)
         painter.setFont(font)
-        elided = painter.fontMetrics().elidedText(self.filename, Qt.ElideMiddle, name_rect.width())
+        elided = painter.fontMetrics().elidedText(self.display_name, Qt.ElideMiddle, name_rect.width())
         painter.drawText(name_rect, Qt.AlignHCenter | Qt.AlignTop, elided)
+
+    def _paint_operations(self, painter: QPainter, rect: QRect) -> None:
+        """One quiet pill in the bottom-left corner: "1024 · rámeček · jpg"."""
+        font = painter.font()
+        font.setPixelSize(10)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        text = " · ".join(OPERATION_LABELS.get(op, op) for op in self.operations)
+        text = metrics.elidedText(text, Qt.ElideRight, rect.width() - 28)
+        pill = QRect(rect.left() + 6, rect.bottom() - 21, metrics.horizontalAdvance(text) + 14, 16)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(10, 8, 24, 150))
+        painter.drawRoundedRect(pill, 8, 8)
+        painter.setPen(QColor(255, 255, 255, 225))
+        painter.drawText(pill, Qt.AlignCenter, text)
+
+    def _paint_behind(self, painter: QPainter, plate: QRect) -> None:
+        """Hook for subclasses: drawn under the plate."""
+
+    def _paint_overlay(self, painter: QPainter, rect: QRect) -> None:
+        """Hook for subclasses: drawn over the image."""
 
     def plate_rect(self) -> QRect:
         """The white plate in card coordinates - the clickable/selectable area."""
         return self._image_rect().adjusted(-PLATE, -PLATE, PLATE, PLATE)
 
-    def set_processed(self, processed: bool, repaint_only: bool = False) -> None:
+    def set_processed(self, processed: bool, operations: list[str] | None = None) -> None:
+        operations = operations or []
+        if processed == self.processed and operations == self.operations:
+            return
         self.processed = processed
+        self.operations = operations
+        tip = self.display_name
+        if processed and operations:
+            tip += "\nZpracováno: " + ", ".join(OPERATION_DESCRIPTIONS.get(op, op) for op in operations)
+        self.setToolTip(tip)
         self.update()
 
     def is_checked(self) -> bool:
@@ -311,6 +384,67 @@ class ThumbnailCard(QWidget):
         self._hovered = False
         self.update()
         super().leaveEvent(event)
+
+
+class FolderCard(ThumbnailCard):
+    """A subfolder in the grid: a little stack of plates showing its first
+    image and how many images it holds. Clicking it opens the folder."""
+
+    is_folder = True
+    STACK = 4  # offset of each plate behind, in px
+
+    def __init__(self, folder: str, dirname: str):
+        self.dirname = dirname
+        self.count = len(list_images(os.path.join(folder, dirname)))
+        super().__init__(folder, dirname + "/", processed=False)
+        self.display_name = dirname
+        self.setToolTip(f"{dirname} – {self.count} {_images_word(self.count)} (otevřít kliknutím)")
+
+    @property
+    def _path(self) -> str:
+        # the thumbnail is the folder's first image
+        sub = os.path.join(self.folder, self.dirname)
+        images = list_images(sub)
+        return os.path.join(sub, images[0]) if images else sub
+
+    def _image_area(self) -> QRect:
+        # Shrunk by the stack's offset, so the plates behind (shifted up and
+        # right) end where a single card's plate does and the grid stays even.
+        inset = 2 * self.STACK
+        return QRect(CARD_PAD, CARD_PAD + inset, THUMB_SIZE - inset, THUMB_SIZE - inset)
+
+    def refresh_count(self) -> None:
+        count = len(list_images(os.path.join(self.folder, self.dirname)))
+        if count != self.count:
+            self.count = count
+            self.setToolTip(f"{self.dirname} – {count} {_images_word(count)} (otevřít kliknutím)")
+            self.update()
+
+    def _paint_behind(self, painter: QPainter, plate: QRect) -> None:
+        painter.setPen(QPen(QColor(0, 0, 0, 40), 1))
+        for depth, alpha in ((2, 120), (1, 190)):
+            offset = depth * self.STACK
+            painter.setBrush(QColor(255, 255, 255, alpha))
+            painter.drawRoundedRect(plate.translated(offset, -offset), PLATE_RADIUS, PLATE_RADIUS)
+
+    def _paint_overlay(self, painter: QPainter, rect: QRect) -> None:
+        font = painter.font()
+        font.setPixelSize(11)
+        font.setBold(True)
+        painter.setFont(font)
+        text = f"{self.count} {_images_word(self.count)}"
+        width = painter.fontMetrics().horizontalAdvance(text) + 18
+        pill = QRect(rect.right() - width - 6, rect.bottom() - 28, width, 22)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 16, 44, 200))
+        painter.drawRoundedRect(pill, 11, 11)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(pill, Qt.AlignCenter, text)
+        font.setBold(False)
+        painter.setFont(font)
+
+
+ThumbnailCard.is_folder = False
 
 
 class _Marquee(QWidget):
@@ -489,22 +623,29 @@ class SelectionPanel(QFrame):
 
 
 class ProcessWorker(QThread):
-    progress = Signal(str, bool, str)  # filename, success, new_path_or_error
+    progress = Signal(str, bool, object)  # filename, success, ProcessResult or error (str)
     finished_all = Signal()
 
-    def __init__(self, folder: str, filenames: list[str], ops: Operations):
+    def __init__(self, folder: str, filenames: list[str], ops: Operations, bordered: set[str],
+                 step: UndoStep, entries: dict[str, dict | None]):
         super().__init__()
         self.folder = folder
         self.filenames = filenames
         self.ops = ops
+        self.bordered = bordered  # files the state says already have a border
+        self.step = step          # originals are copied here first, for undo
+        self.entries = entries    # their folder-state entries, for undo
 
     def run(self) -> None:
         for filename in self.filenames:
             full_path = os.path.join(self.folder, filename)
             try:
-                new_path = process_file(full_path, self.ops)
-                self.progress.emit(filename, True, new_path)
+                self.step.backup(full_path, self.entries.get(filename))
+                result = process_file(full_path, self.ops, has_border=filename in self.bordered)
+                self.step.set_results(full_path, result.paths)
+                self.progress.emit(filename, True, result)
             except Exception as exc:  # noqa: BLE001
+                self.step.discard(full_path)
                 self.progress.emit(filename, False, str(exc))
         self.finished_all.emit()
 
@@ -520,6 +661,7 @@ class MainWindow(QMainWindow):
 
         self.settings = QSettings("PhotoBatchEditor", "PhotoBatchEditor")
         self.folder: str | None = None
+        self.root_folder: str = ""
         self.state: FolderState | None = None
         self.cards: dict[str, ThumbnailCard] = {}
         self._columns = 0
@@ -530,13 +672,34 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self.refresh_files)
         self.watcher.changed.connect(self._refresh_timer.start)
         self.worker: ProcessWorker | None = None
+        self._prior_ops: dict[str, list[str]] = {}
+        self.undo_stack = UndoStack()
+        self._update_worker: UpdateCheckWorker | None = None
+        self._download_worker: DownloadWorker | None = None
+        self._process_step: UndoStep | None = None
+        self._crop_step: UndoStep | None = None
+        self._skipped_border = 0
         self.export_worker: ExportWorker | None = None
         self.export_folder: str = self.settings.value("export_folder", "", type=str)
         self._export_errors: list[str] = []
         self._export_count = 0
+        self._export_recent: list[str] = []  # names moved this session, newest first
+        self.export_watcher = FolderWatcher()
+        self._export_timer = QTimer(self)
+        self._export_timer.setSingleShot(True)
+        self._export_timer.setInterval(150)
+        self._export_timer.timeout.connect(self._refresh_export_preview)
+        self.export_watcher.changed.connect(self._export_timer.start)
 
         self._build_ui()
+        self._watch_export_folder()
+        self.setAcceptDrops(True)
         QShortcut(QKeySequence.SelectAll, self, activated=self.select_all)
+        QShortcut(QKeySequence(Qt.Key_Backspace), self, activated=self.go_up)
+        QShortcut(QKeySequence.Delete, self, activated=self.delete_selected)
+        QShortcut(QKeySequence.Undo, self, activated=self.undo_last)
+        QShortcut(QKeySequence.Redo, self, activated=self.redo_last)  # Ctrl+Y
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=self.redo_last)
         self._restore_last_folder()
 
     # -- UI construction -------------------------------------------------
@@ -559,11 +722,20 @@ class MainWindow(QMainWindow):
         footer.setContentsMargins(6, 0, 6, 0)
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: rgba(241, 240, 250, 175); font-size: 12px;")
-        version_label = QLabel(f"v{CURRENT_VERSION}")
-        version_label.setStyleSheet("color: rgba(241, 240, 250, 120); font-size: 12px;")
+        version_btn = QPushButton(f"v{CURRENT_VERSION} · Co je nového")
+        version_btn.setObjectName("LinkButton")
+        version_btn.setCursor(Qt.PointingHandCursor)
+        version_btn.setToolTip("Zobrazit novinky v této verzi")
+        version_btn.clicked.connect(self.show_whats_new)
+        self.update_btn = QPushButton(self.UPDATE_TEXT)
+        self.update_btn.setObjectName("LinkButton")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.setToolTip("Zjistí, jestli na GitHubu není novější verze")
+        self.update_btn.clicked.connect(self.check_for_updates)
         footer.addWidget(self.status_label)
         footer.addStretch(1)
-        footer.addWidget(version_label)
+        footer.addWidget(self.update_btn)
+        footer.addWidget(version_btn)
         root.addLayout(footer)
         self._update_status()
 
@@ -581,10 +753,21 @@ class MainWindow(QMainWindow):
         self.choose_folder_btn.clicked.connect(self.choose_folder)
         folder_row.addWidget(self.choose_folder_btn)
 
+        self.back_btn = QPushButton("← Zpět")
+        self.back_btn.setToolTip("Zpět do nadřazené složky (Backspace)")
+        self.back_btn.clicked.connect(self.go_up)
+        self.back_btn.hide()
+        folder_row.addWidget(self.back_btn)
+
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setReadOnly(True)
         self.folder_path_edit.setPlaceholderText("Nevybrána žádná složka")
         folder_row.addWidget(self.folder_path_edit, stretch=1)
+
+        self.add_files_btn = QPushButton("Přidat soubory…")
+        self.add_files_btn.setToolTip("Zkopíruje soubory do složky (lze je sem i přetáhnout myší)")
+        self.add_files_btn.clicked.connect(self.choose_files_to_add)
+        folder_row.addWidget(self.add_files_btn)
         layout.addLayout(folder_row)
 
         self.scroll_area = QScrollArea()
@@ -597,7 +780,7 @@ class MainWindow(QMainWindow):
         self.grid_container.cards_getter = lambda: self.cards
         self.grid_container.scrollbar = self.scroll_area.verticalScrollBar()
         self.grid_container.viewport = self.scroll_area.viewport()
-        self.grid_container.card_clicked.connect(self._show_preview)
+        self.grid_container.card_clicked.connect(self._open_card)
         self.grid_container.selection_changed.connect(self._update_status)
         self.scroll_area.setWidget(self.grid_container)
         folder_panel.canvas = self.grid_container
@@ -608,11 +791,16 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> SidebarPanel:
         self.sidebar = SidebarPanel(self.export_folder)
         self.sidebar.process_requested.connect(self.apply_to_selected)
+        self.sidebar.undo_requested.connect(self.undo_last)
+        self.sidebar.redo_requested.connect(self.redo_last)
         self.sidebar.select_all_requested.connect(self.select_all)
         self.sidebar.select_none_requested.connect(self.select_none)
         self.sidebar.clear_marks_requested.connect(self.reset_processed_marks)
+        self.sidebar.delete_requested.connect(self.delete_selected)
         self.sidebar.choose_export_folder_requested.connect(self.choose_export_folder)
         self.sidebar.export_requested.connect(self.export_selected)
+        self.sidebar.open_export_folder_requested.connect(self.open_export_folder)
+        self.sidebar.export_item_clicked.connect(self._open_export_item)
         return self.sidebar
 
     # -- Folder handling ---------------------------------------------------
@@ -627,11 +815,17 @@ class MainWindow(QMainWindow):
         if last and os.path.isdir(last):
             self._set_folder(last)
 
-    def _set_folder(self, folder: str) -> None:
+    def _set_folder(self, folder: str, subfolder: bool = False) -> None:
+        """Shows `folder`. A subfolder opened from the grid keeps the chosen
+        folder as the root that "Zpět" returns to."""
+        folder = os.path.normpath(folder)
+        if not subfolder:
+            self.root_folder = folder
+            self.settings.setValue("last_folder", folder)
         self.folder = folder
         self.state = FolderState(folder)
         self.folder_path_edit.setText(folder)
-        self.settings.setValue("last_folder", folder)
+        self.back_btn.setVisible(not same_folder(folder, self.root_folder))
         for card in self.cards.values():
             card.hide()
             card.deleteLater()
@@ -643,8 +837,9 @@ class MainWindow(QMainWindow):
         if not self.folder or not self.state:
             return
         filenames = list_images(self.folder)
+        folders = [name + "/" for name in list_subfolders(self.folder)]
         existing = set(self.cards.keys())
-        current = set(filenames)
+        current = set(filenames) | set(folders)
 
         # Remove cards for files that disappeared.
         for name in existing - current:
@@ -654,23 +849,217 @@ class MainWindow(QMainWindow):
 
         # Add cards for new files.
         for name in current - existing:
-            processed = self.state.is_processed(name)
-            card = ThumbnailCard(self.folder, name, processed)
+            if name.endswith("/"):
+                card = FolderCard(self.folder, name[:-1])
+            else:
+                card = ThumbnailCard(self.folder, name, False)
+                card.set_processed(self.state.is_processed(name), self.state.operations(name))
             card.toggled.connect(self._update_status)
             self.cards[name] = card
 
         # Update processed state for files that already have a card
         # (covers the case where an external edit invalidated the flag).
         for name in current & existing:
-            self.cards[name].reload_if_changed()
-            self.cards[name].set_processed(self.state.is_processed(name))
+            card = self.cards[name]
+            card.reload_if_changed()
+            if card.is_folder:
+                card.refresh_count()
+            else:
+                card.set_processed(self.state.is_processed(name), self.state.operations(name))
 
         self._relayout(force=True)
         self._update_status()
 
-    def _show_preview(self, filename: str) -> None:
-        if self.folder:
-            PreviewDialog(self, os.path.join(self.folder, filename)).exec()
+    # -- Undo -------------------------------------------------------------------
+    def _refresh_undo(self) -> None:
+        undo, redo = self.undo_stack.next_undo(), self.undo_stack.next_redo()
+        self.sidebar.set_history(undo.label if undo else None, redo.label if redo else None)
+
+    def undo_last(self) -> None:
+        self._history_step(redo=False)
+
+    def redo_last(self) -> None:
+        self._history_step(redo=True)
+
+    def _history_step(self, redo: bool) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        if (self.undo_stack.next_redo() if redo else self.undo_stack.next_undo()) is None:
+            self._show_notice("Není co zopakovat." if redo else "Není co vrátit.")
+            return
+        states: dict[str, FolderState] = {}
+
+        def state_for(folder: str) -> FolderState:
+            if self.state is not None and same_folder(folder, self.folder):
+                return self.state
+            key = os.path.normcase(os.path.abspath(folder))
+            return states.setdefault(key, FolderState(folder))
+
+        action = self.undo_stack.redo if redo else self.undo_stack.undo
+        step, restored, missing = action(state_for)
+        self._refresh_undo()
+        self.refresh_files()
+        if missing:
+            warning(self, "Něco nešlo " + ("zopakovat" if redo else "vrátit"),
+                    "Tyto soubory se mezitím přesunuly nebo smazaly, a tak zůstaly, jak jsou:\n"
+                    + "\n".join(missing))
+        if restored:
+            self._show_notice(("Znovu provedeno: " if redo else "Vráceno: ") + step.label)
+
+    def closeEvent(self, event) -> None:
+        self.undo_stack.close()
+        super().closeEvent(event)
+
+    # -- Updates -----------------------------------------------------------------
+    UPDATE_TEXT = "Zkontrolovat aktualizace"
+
+    def check_for_updates(self) -> None:
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Kontroluji…")
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.result.connect(self._on_update_checked)
+        self._update_worker.start()
+
+    def _reset_update_button(self) -> None:
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText(self.UPDATE_TEXT)
+
+    def _on_update_checked(self, info, error: str) -> None:
+        self._reset_update_button()
+        if error:
+            self._show_notice(f"Aktualizace se nepodařilo ověřit – {error.lower()}.", "warning")
+            return
+        if info is None:
+            self._show_notice(f"Máte nejnovější verzi (v{CURRENT_VERSION}).")
+            return
+        if not can_self_update():
+            information(self, f"Je k dispozici verze {info.version}",
+                        "Aktualizovat jde jen nainstalovaná aplikace. Stáhněte si nový instalátor z GitHubu.")
+            return
+        if confirm(self, f"Je k dispozici verze {info.version}",
+                   f"Máte verzi {CURRENT_VERSION}. Stáhnout a nainstalovat novou verzi?\n\n"
+                   "Aplikace se během instalace zavře a sama znovu spustí.",
+                   "Aktualizovat"):
+            self._download_update(info)
+
+    def _download_update(self, info) -> None:
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Stahuji aktualizaci… 0 %")
+        self._download_worker = DownloadWorker(info.url, info.size)
+        self._download_worker.progress.connect(
+            lambda percent: self.update_btn.setText(f"Stahuji aktualizaci… {percent} %"))
+        self._download_worker.finished_ok.connect(self._on_update_downloaded)
+        self._download_worker.failed.connect(self._on_update_failed)
+        self._download_worker.start()
+
+    def _on_update_downloaded(self, path: str) -> None:
+        self.update_btn.setText("Instaluji…")
+        run_installer(path)
+        QTimer.singleShot(500, QApplication.instance().quit)
+
+    def _on_update_failed(self, message: str) -> None:
+        self._reset_update_button()
+        warning(self, "Stažení selhalo", f"Aktualizaci se nepodařilo stáhnout.\n{message}")
+
+    # -- What's new -----------------------------------------------------------
+    def show_whats_new(self) -> None:
+        whats_new(self, [entry for entry in CHANGELOG if entry[0] == CURRENT_VERSION] or CHANGELOG[:1])
+
+    def show_whats_new_after_update(self) -> None:
+        """Once per new version: what changed since the last version seen."""
+        seen = self.settings.value("seen_version", "", type=str)
+        if seen == CURRENT_VERSION:
+            return
+        self.settings.setValue("seen_version", CURRENT_VERSION)
+        whats_new(self, changes_since(seen, CURRENT_VERSION))
+
+    # -- Adding files ------------------------------------------------------
+    def choose_files_to_add(self) -> None:
+        patterns = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Přidat soubory do složky", "",
+            f"Obrázky a PDF ({patterns});;Všechny soubory (*)",
+        )
+        if paths:
+            self.add_files(paths)
+
+    @staticmethod
+    def _supported_drop(event) -> list[str]:
+        if not event.mimeData().hasUrls():
+            return []
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        return [p for p in paths if os.path.isfile(p) and os.path.splitext(p)[1].lower() in SUPPORTED_EXTENSIONS]
+
+    def dragEnterEvent(self, event) -> None:
+        if self._supported_drop(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        paths = self._supported_drop(event)
+        if paths:
+            event.acceptProposedAction()
+            self.add_files(paths)
+
+    def add_files(self, paths: list[str]) -> None:
+        if not self.folder:
+            information(self, "Není vybrána složka", "Nejprve vyberte složku, kam se soubory přidají.")
+            return
+        errors, skipped = [], []
+        for path in paths:
+            name = os.path.basename(path)
+            if os.path.splitext(name)[1].lower() not in SUPPORTED_EXTENSIONS:
+                skipped.append(name)
+                continue
+            if same_folder(os.path.dirname(path), self.folder):
+                continue  # already there
+            try:
+                shutil.copy2(path, unique_path(self.folder, name))
+            except OSError as exc:
+                errors.append(f"{name}: {exc}")
+        self.refresh_files()
+        if errors or skipped:
+            lines = errors + [f"{name}: nepodporovaný formát" for name in skipped]
+            warning(self, "Některé soubory se nepřidaly", "\n".join(lines))
+
+    def _open_card(self, name: str) -> None:
+        if not self.folder:
+            return
+        card = self.cards.get(name)
+        if card is not None and card.is_folder:
+            self._set_folder(os.path.join(self.folder, card.dirname), subfolder=True)
+        else:
+            dialog = PreviewDialog(self, os.path.join(self.folder, name))
+            dialog.about_to_crop.connect(self._before_crop)
+            dialog.crop_failed.connect(self._crop_failed)
+            dialog.cropped.connect(self._on_cropped)
+            dialog.exec()
+
+    def _before_crop(self, path: str) -> None:
+        self._crop_step = self.undo_stack.begin(f"ořez {os.path.basename(path)}", self.folder)
+        entry = self.state.entry(os.path.basename(path)) if self.state else None
+        try:
+            self._crop_step.backup(path, entry)
+        except OSError:
+            pass  # no backup, no undo for this crop - the crop itself still works
+
+    def _crop_failed(self, path: str) -> None:
+        self._crop_step.discard(path)
+        self.undo_stack.drop_if_empty(self._crop_step)
+
+    def _on_cropped(self, path: str) -> None:
+        self._crop_step.set_results(path, [path])
+        self.undo_stack.drop_if_empty(self._crop_step)
+        self._refresh_undo()
+        if self.state and same_folder(os.path.dirname(path), self.folder):
+            name = os.path.basename(path)
+            self.state.mark_processed(name, self.state.operations(name) + ["crop"])
+            self.refresh_files()
+
+    def go_up(self) -> None:
+        if self.folder and not same_folder(self.folder, self.root_folder):
+            self._set_folder(os.path.dirname(self.folder), subfolder=True)
 
     def _relayout(self, force: bool = False) -> None:
         cell_w = THUMB_SIZE + CARD_PAD * 2
@@ -683,7 +1072,8 @@ class MainWindow(QMainWindow):
         reflowed = columns != self._columns
         self._columns = columns
 
-        names = sorted(self.cards.keys(), key=str.lower)
+        # folders first, then files, each alphabetically
+        names = sorted(self.cards.keys(), key=lambda n: (not self.cards[n].is_folder, n.lower()))
         used = min(columns, len(names))
         x0 = max(0, (view_w - used * cell_w) // 2)
         for index, name in enumerate(names):
@@ -714,6 +1104,41 @@ class MainWindow(QMainWindow):
             card.set_checked(False)
         self._update_status()
 
+    def delete_selected(self) -> None:
+        """Moves the selected files (and folders) to the Recycle Bin."""
+        if not self.folder or self.worker is not None and self.worker.isRunning():
+            return
+        if self.export_worker is not None and self.export_worker.isRunning():
+            return
+        selected = [name for name, card in self.cards.items() if card.is_checked()]
+        if not selected:
+            return
+        folders = sum(1 for n in selected if self.cards[n].is_folder)
+        files = len(selected) - folders
+        parts = ([_plural(files, "soubor", "soubory", "souborů")] if files else []) + \
+                ([_plural(folders, "složku", "složky", "složek")] if folders else [])
+        if not confirm(
+            self, "Smazat vybrané?",
+            f"Smaže se {' a '.join(parts)} ze složky\n{self.folder}\n\n"
+            "Soubory se přesunou do Koše, odkud je jde obnovit.",
+            "Smazat", danger=True,
+        ):
+            return
+        errors = []
+        for name in selected:
+            path = os.path.join(self.folder, name.rstrip("/"))
+            if QFile.moveToTrash(path):
+                if self.state:
+                    self.state.forget(name)
+            else:
+                errors.append(name.rstrip("/"))
+        self.refresh_files()
+        if errors:
+            warning(self, "Některé soubory se nesmazaly",
+                    "Nepodařilo se přesunout do Koše:\n" + "\n".join(errors))
+        else:
+            self._show_notice(f"Přesunuto do Koše: {_plural(len(selected), 'položka', 'položky', 'položek')}")
+
     def reset_processed_marks(self) -> None:
         if not self.state:
             return
@@ -722,12 +1147,18 @@ class MainWindow(QMainWindow):
             card.set_processed(False)
         self._update_status()
 
+    def _show_notice(self, text: str, kind: str = "info") -> None:
+        toast(self, text, kind)
+
     def _update_status(self) -> None:
-        total = len(self.cards)
+        folders = sum(1 for c in self.cards.values() if c.is_folder)
+        total = len(self.cards) - folders
         selected = sum(1 for c in self.cards.values() if c.is_checked())
         processed = sum(1 for c in self.cards.values() if c.processed)
-        self.status_label.setText(f"{total} souborů · {selected} vybráno · {processed} zpracováno")
-        self.sidebar.set_selected_count(selected)
+        parts = [f"{total} souborů"] + ([f"{folders} složek"] if folders else [])
+        parts += [f"{selected} vybráno", f"{processed} zpracováno"]
+        self.status_label.setText(" · ".join(parts))
+        self.sidebar.set_selected_count(selected, len(self.cards))
 
     # -- Export ---------------------------------------------------------
     def choose_export_folder(self) -> None:
@@ -737,29 +1168,51 @@ class MainWindow(QMainWindow):
             return
         self.export_folder = folder
         self.settings.setValue("export_folder", folder)
+        self._export_recent = []
         self.sidebar.set_export_folder(folder)
+        self._watch_export_folder()
+
+    def _watch_export_folder(self) -> None:
+        if self.export_folder and os.path.isdir(self.export_folder):
+            self.export_watcher.start(self.export_folder)
+        else:
+            self.export_watcher.stop()
+
+    def _refresh_export_preview(self) -> None:
+        self.sidebar.show_export_preview(self.export_folder, self._export_recent)
+
+    def open_export_folder(self) -> None:
+        if self.export_folder and os.path.isdir(self.export_folder):
+            os.startfile(self.export_folder)
+
+    def _open_export_item(self, path: str) -> None:
+        if os.path.isdir(path):
+            os.startfile(path)
+        elif os.path.isfile(path):
+            PreviewDialog(self, path).exec()
 
     def export_selected(self) -> None:
         if not self.folder:
-            QMessageBox.information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
+            information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
             return
-        selected = [name for name, card in self.cards.items() if card.is_checked()]
+        selected = [name.rstrip("/") for name, card in self.cards.items() if card.is_checked()]
         if not selected:
-            QMessageBox.information(self, "Žádný výběr", "Vyberte alespoň jednu fotku.")
+            information(self, "Žádný výběr", "Vyberte alespoň jednu fotku.")
             return
         if not self.export_folder:
             self.choose_export_folder()
             if not self.export_folder:
                 return
         if not os.path.isdir(self.export_folder):
-            QMessageBox.warning(self, "Cílová složka neexistuje", self.export_folder)
+            warning(self, "Cílová složka neexistuje", self.export_folder)
             return
         if same_folder(self.export_folder, self.folder):
-            QMessageBox.information(self, "Stejná složka", "Cílová složka je stejná jako zdrojová.")
+            information(self, "Stejná složka", "Cílová složka je stejná jako zdrojová.")
             return
 
         self._export_errors = []
         self._export_count = 0
+        self._export_moved: list[str] = []
         self.sidebar.set_exporting(True)
         self.export_worker = ExportWorker(self.folder, selected, self.export_folder)
         self.export_worker.progress.connect(self._on_file_exported)
@@ -769,6 +1222,7 @@ class MainWindow(QMainWindow):
     def _on_file_exported(self, filename: str, success: bool, info: str) -> None:
         if success:
             self._export_count += 1
+            self._export_moved.append(os.path.basename(info))
             if self.state:
                 self.state.forget(filename)
         else:
@@ -776,50 +1230,79 @@ class MainWindow(QMainWindow):
 
     def _on_export_finished(self) -> None:
         self.sidebar.set_exporting(False)
+        moved = self._export_moved
+        self._export_recent = moved + [n for n in self._export_recent if n not in moved]
+        self._refresh_export_preview()
         if self._export_errors:
-            QMessageBox.warning(
+            warning(
                 self, "Export dokončen s chybami",
                 f"Přesunuto: {self._export_count}\n\n" + "\n".join(self._export_errors),
             )
         else:
-            self.status_label.setText(f"Přesunuto {self._export_count} souborů do {self.export_folder}")
+            target = os.path.basename(os.path.normpath(self.export_folder))
+            self._show_notice(f"Odesláno do „{target}“: {_plural(self._export_count, 'soubor', 'soubory', 'souborů')}")
 
     # -- Processing -----------------------------------------------------
     def apply_to_selected(self) -> None:
         if not self.folder or not self.state:
-            QMessageBox.information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
+            information(self, "Není vybrána složka", "Nejprve vyberte složku s fotkami.")
             return
 
         ops = self.sidebar.operations()
         if not ops.any:
-            QMessageBox.information(self, "Žádná akce", "Zaškrtněte alespoň jednu operaci.")
+            information(self, "Žádná akce", "Zaškrtněte alespoň jednu operaci.")
             return
 
-        selected = [name for name, card in self.cards.items() if card.is_checked()]
+        selected = [name for name, card in self.cards.items() if card.is_checked() and not card.is_folder]
         if not selected:
-            QMessageBox.information(self, "Žádný výběr", "Vyberte alespoň jednu fotku.")
+            information(self, "Žádný výběr", "Vyberte alespoň jednu fotku (složky se nezpracovávají).")
             return
 
+        # what was done before (e.g. a crop) is kept and extended
+        self._prior_ops = {name: self.state.operations(name) for name in selected}
+        self._skipped_border = 0
+        bordered = {name for name, done in self._prior_ops.items() if "border" in done}
+        entries = {name: self.state.entry(name) for name in selected}
+        self._process_step = self.undo_stack.begin(
+            "zpracování " + _plural(len(selected), "fotky", "fotek", "fotek"), self.folder)
         self.sidebar.set_processing(True)
-        self.worker = ProcessWorker(self.folder, selected, ops)
+        self.worker = ProcessWorker(self.folder, selected, ops, bordered, self._process_step, entries)
         self.worker.progress.connect(self._on_file_processed)
         self.worker.finished_all.connect(self._on_processing_finished)
         self.worker.start()
 
-    def _on_file_processed(self, filename: str, success: bool, info: str) -> None:
+    def _on_file_processed(self, filename: str, success: bool, info) -> None:
         if not success:
-            QMessageBox.warning(self, "Chyba při zpracování", f"{filename}: {info}")
+            warning(self, "Chyba při zpracování", f"{filename}: {info}")
             return
+        if info.skipped_border:
+            self._skipped_border += 1
         if self.state:
-            new_name = os.path.basename(info)
-            if new_name != filename:
-                self.state.rename(filename, new_name)
-            self.state.mark_processed(new_name)
+            done = self._prior_ops.get(filename, []) + info.applied
+            if info.skipped_border:
+                done.append("border")  # it has one, just not a second
+            if filename not in (os.path.basename(p) for p in info.paths):
+                self.state.forget(filename)
+            # pages of a multi-page PDF land in a subfolder with its own state
+            states: dict[str, FolderState] = {}
+            for path in info.paths:
+                folder = os.path.dirname(path)
+                if same_folder(folder, self.folder):
+                    state = self.state
+                else:
+                    state = states.setdefault(folder, FolderState(folder))
+                state.mark_processed(os.path.basename(path), done)
         self.refresh_files()
 
     def _on_processing_finished(self) -> None:
         self.sidebar.set_processing(False)
+        self.undo_stack.drop_if_empty(self._process_step)
+        self._refresh_undo()
         self.refresh_files()
+        if self._skipped_border:
+            count = _plural(self._skipped_border, "fotka", "fotky", "fotek")
+            had = "měla" if self._skipped_border == 1 else "měly"
+            self._show_notice(f"Rámeček už {had} {count} – znovu jsem ho nepřidal.", "warning")
 
 
 MIN_SPLASH_MS = 1300
@@ -906,6 +1389,7 @@ class StartupController:
         self.window.show()
         enable_windows_acrylic_blur(int(self.window.winId()))
         set_windows_titlebar(int(self.window.winId()))
+        QTimer.singleShot(450, self.window.show_whats_new_after_update)
 
 
 def run() -> None:

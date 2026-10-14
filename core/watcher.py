@@ -28,6 +28,9 @@ class _Handler(FileSystemEventHandler):
 
     def on_any_event(self, event):
         if event.is_directory:
+            # subfolders show up as folder cards (e.g. pages of a PDF)
+            if event.event_type in ("created", "deleted", "moved"):
+                self._bridge.changed.emit()
             return
         paths = [event.src_path]
         if hasattr(event, "dest_path") and event.dest_path:

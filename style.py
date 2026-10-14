@@ -10,6 +10,7 @@ import sys
 
 ACCENT_COLOR = "#7F5AF0"
 ACCENT_COLOR_2 = "#2CB1BC"
+ACCENT_LIGHT = "#b9a5ff"
 DANGER_COLOR = "#ff6b6b"
 SUCCESS_COLOR = "#2ecc71"
 
@@ -96,37 +97,47 @@ QPushButton:disabled {{
 }}
 
 QPushButton#PrimaryButton {{
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:0,
-        stop:0 {ACCENT_COLOR}, stop:1 {ACCENT_COLOR_2}
-    );
-    border: 1px solid rgba(255, 255, 255, 90);
+    background-color: {ACCENT_COLOR};
+    border: 1px solid rgba(255, 255, 255, 60);
     color: #ffffff;
     font-weight: 700;
     padding: 9px 20px;
 }}
 
 QPushButton#PrimaryButton:hover {{
-    border: 1px solid rgba(255, 255, 255, 160);
-}}
-
-QPushButton#PrimaryButton:disabled {{
-    background: rgba(255, 255, 255, 25);
-    color: rgba(255, 255, 255, 130);
+    background-color: #8f6df5;
+    border: 1px solid rgba(255, 255, 255, 120);
 }}
 
 QPushButton#AccentButton {{
-    background-color: rgba(127, 90, 240, 70);
-    border: 1px solid rgba(127, 90, 240, 190);
+    background-color: rgba(127, 90, 240, 55);
+    border: 1px solid rgba(127, 90, 240, 160);
+    color: #ffffff;
 }}
 
 QPushButton#AccentButton:hover {{
-    background-color: rgba(127, 90, 240, 120);
+    background-color: rgba(127, 90, 240, 105);
 }}
 
-QPushButton#AccentButton:disabled {{
-    background-color: rgba(255, 255, 255, 12);
-    border: 1px solid rgba(255, 255, 255, 40);
+/* one disabled look for every main button */
+QPushButton#PrimaryButton:disabled, QPushButton#AccentButton:disabled,
+QPushButton#DangerButton:disabled, QPushButton#QuietDangerButton:disabled {{
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 30);
+    color: rgba(255, 255, 255, 95);
+}}
+
+QPushButton#QuietDangerButton {{
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 30);
+    font-weight: 400;
+    color: rgba(255, 170, 170, 230);
+}}
+
+QPushButton#QuietDangerButton:hover {{
+    background-color: rgba(255, 107, 107, 45);
+    border: 1px solid rgba(255, 107, 107, 150);
+    color: #ffffff;
 }}
 
 QPushButton#GhostButton {{
@@ -140,6 +151,128 @@ QPushButton#GhostButton {{
 QPushButton#GhostButton:hover {{
     color: #ffffff;
     background-color: rgba(255, 255, 255, 18);
+}}
+
+QPushButton#DangerButton {{
+    background-color: rgba(255, 107, 107, 38);
+    border: 1px solid rgba(255, 107, 107, 150);
+    color: #ffd9d9;
+}}
+
+QPushButton#DangerButton:hover {{
+    background-color: rgba(255, 107, 107, 85);
+    color: #ffffff;
+}}
+
+QPushButton#DangerSolidButton {{
+    background-color: {DANGER_COLOR};
+    border: 1px solid rgba(255, 255, 255, 90);
+    color: #ffffff;
+    font-weight: 700;
+}}
+
+QPushButton#DangerSolidButton:hover {{
+    background-color: #ff8585;
+    border: 1px solid rgba(255, 255, 255, 160);
+}}
+
+QFrame#Segmented {{
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 30);
+    border-radius: 10px;
+}}
+
+QPushButton#SegmentButton {{
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 0 10px;
+    font-weight: 400;
+    color: rgba(241, 240, 250, 215);
+}}
+
+QPushButton#SegmentButton:hover {{
+    background-color: rgba(255, 255, 255, 22);
+    color: #ffffff;
+}}
+
+QPushButton#SegmentButton:pressed {{
+    background-color: rgba(255, 255, 255, 12);
+}}
+
+QPushButton#SegmentButton:disabled {{
+    background: transparent;
+    color: rgba(255, 255, 255, 80);
+}}
+
+QLabel#SelectionCount {{
+    font-size: 11px;
+    color: rgba(241, 240, 250, 110);
+}}
+
+QLabel#SelectionCount[active="true"] {{
+    font-weight: 700;
+    color: {ACCENT_LIGHT};
+}}
+
+QFrame#HistoryGroup {{
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 30);
+    border-radius: 9px;
+}}
+
+QPushButton#HistoryButton {{
+    background-color: rgba(127, 90, 240, 110);
+    border: none;
+    border-radius: 7px;
+    padding: 0;
+}}
+
+QPushButton#HistoryButton:hover {{
+    background-color: {ACCENT_COLOR};
+}}
+
+QPushButton#HistoryButton:disabled {{
+    background: transparent;
+}}
+
+QFrame#Separator {{
+    background-color: rgba(255, 255, 255, 22);
+    border: none;
+}}
+
+QLabel#Hint {{
+    font-size: 11px;
+    color: rgba(241, 240, 250, 115);
+}}
+
+QPushButton#LinkButton, QPushButton#LinkDanger {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(241, 240, 250, 165);
+}}
+
+QPushButton#LinkButton:hover {{
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 16);
+}}
+
+QPushButton#LinkDanger {{
+    color: rgba(255, 140, 140, 210);
+}}
+
+QPushButton#LinkDanger:hover {{
+    color: #ffb3b3;
+    background-color: rgba(255, 107, 107, 30);
+}}
+
+QPushButton#LinkButton:disabled, QPushButton#LinkDanger:disabled {{
+    color: rgba(255, 255, 255, 60);
+    background: transparent;
 }}
 
 QFrame#Section {{
