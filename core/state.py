@@ -1,6 +1,7 @@
 """Persisted processing state for a watched folder.
 
-Keeps a hidden JSON sidecar file inside the folder that remembers which
+Keeps a JSON file per folder in the user's local app data (not in the folder
+itself, so nothing appears e.g. on the Desktop) that remembers which
 images were already processed, what was done to them (see OPERATION_LABELS)
 and their mtime at the time, so the
 "processed" flag survives app restarts and is cleared automatically if the
@@ -8,11 +9,24 @@ file changes again on disk (re-edited outside the app).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 
+# Old sidecar name; such files are migrated and removed from the folder.
 STATE_FILENAME = ".photobatch_state.json"
+
+
+def _state_dir() -> str:
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "PhotoBatchEditor", "state")
+
+
+def _state_path(folder: str) -> str:
+    key = os.path.normcase(os.path.abspath(folder))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(_state_dir(), f"{digest}.json")
 
 # Operation ids stored per file, in display order, with their short labels.
 OPERATION_LABELS = {
@@ -39,10 +53,11 @@ def ordered_operations(ops) -> list[str]:
 class FolderState:
     def __init__(self, folder: str):
         self.folder = folder
-        self.path = os.path.join(folder, STATE_FILENAME)
+        self.path = _state_path(folder)
         self._lock = threading.Lock()
         self._data: dict[str, dict] = {}
         self._load()
+        self._migrate_sidecar()
 
     def _load(self) -> None:
         if os.path.isfile(self.path):
@@ -52,8 +67,27 @@ class FolderState:
             except (json.JSONDecodeError, OSError):
                 self._data = {}
 
+    def _migrate_sidecar(self) -> None:
+        """Moves state from the old hidden file inside the folder, then deletes it."""
+        old = os.path.join(self.folder, STATE_FILENAME)
+        if not os.path.isfile(old):
+            return
+        try:
+            with open(old, "r", encoding="utf-8") as f:
+                legacy = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            legacy = {}
+        if isinstance(legacy, dict):
+            self._data = {**legacy, **self._data}
+            self._save()
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+
     def _save(self) -> None:
         try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2)
         except OSError:
