@@ -39,7 +39,7 @@ jobs:
     - name: Build app with PyInstaller (one folder)
       run: >
         pyinstaller --noconfirm --onedir --windowed
-        --name ImageEditor
+        --name LibrionZonerPlus
         --icon icon.ico --add-data "icon.ico;."
         main.py
 
@@ -53,17 +53,17 @@ jobs:
       shell: pwsh
       run: |
         & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" inno.iss
-        if (-not (Test-Path Output\ImageEditor_Setup.exe)) { throw "Installer was not created" }
+        if (-not (Test-Path Output\LibrionZonerPlus_Setup.exe)) { throw "Installer was not created" }
 
     - name: Upload artifact
       uses: actions/upload-artifact@v7
       with:
-        name: ImageEditor-Setup
-        path: Output/ImageEditor_Setup.exe
+        name: LibrionZonerPlus-Setup
+        path: Output/LibrionZonerPlus_Setup.exe
 
     - name: Publish GitHub Release
       if: startsWith(github.ref, 'refs/tags/v')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-      run: gh release create "$GITHUB_REF_NAME" Output/ImageEditor_Setup.exe --title "$GITHUB_REF_NAME" --generate-notes
+      run: gh release create "$GITHUB_REF_NAME" Output/LibrionZonerPlus_Setup.exe --title "$GITHUB_REF_NAME" --generate-notes

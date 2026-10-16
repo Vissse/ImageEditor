@@ -14,13 +14,21 @@ import json
 import os
 import threading
 
+from core.config import APP_NAME, OLD_INTERNAL_NAME
+
 # Old sidecar name; such files are migrated and removed from the folder.
 STATE_FILENAME = ".photobatch_state.json"
 
 
 def _state_dir() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "PhotoBatchEditor", "state")
+    new, old = os.path.join(base, APP_NAME), os.path.join(base, OLD_INTERNAL_NAME)
+    if not os.path.exists(new) and os.path.isdir(old):
+        try:  # keep the state from before the rename
+            os.rename(old, new)
+        except OSError:
+            pass
+    return os.path.join(new, "state")
 
 
 def _state_path(folder: str) -> str:

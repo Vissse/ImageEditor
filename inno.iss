@@ -1,8 +1,8 @@
-; Inno Setup script for ImageEditor.
+; Inno Setup script for LibrionZonerPlus (formerly ImageEditor).
 ; Version comes from the APP_VERSION environment variable (build.ps1 and the
 ; release workflow set it from core/config.py).
-#define MyAppName "ImageEditor"
-#define MyAppExeName "ImageEditor.exe"
+#define MyAppName "LibrionZonerPlus"
+#define MyAppExeName "LibrionZonerPlus.exe"
 
 #define AppVersion GetEnv("APP_VERSION")
 #if AppVersion == ""
@@ -10,7 +10,8 @@
 #endif
 
 [Setup]
-; Fixed AppId: a newer installer recognises the old install and upgrades it in place.
+; Fixed AppId: a newer installer recognises the old install and upgrades it in place
+; (also installs from before the rename, which stay in their ImageEditor folder).
 AppId={{6D2C9B1E-5A4F-4E7B-9C3D-1F8A2B7E4D60}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
@@ -27,7 +28,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=icon.ico
 OutputDir=Output
-OutputBaseFilename=ImageEditor_Setup
+OutputBaseFilename=LibrionZonerPlus_Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -40,6 +41,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Leftovers of the app under its old name, ImageEditor.
+Type: files; Name: "{app}\ImageEditor.exe"
+Type: files; Name: "{autoprograms}\ImageEditor.lnk"
+Type: files; Name: "{autodesktop}\ImageEditor.lnk"
+
 [Files]
 Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -49,6 +56,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Registry]
 ; Remembered photo folder (QSettings) - removed together with the app.
+Root: HKCU; Subkey: "Software\{#MyAppName}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\PhotoBatchEditor"; Flags: uninsdeletekey
 
 [Run]

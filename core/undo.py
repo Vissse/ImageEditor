@@ -77,7 +77,7 @@ def _same(a: str, b: str) -> bool:
 class UndoStack:
     def __init__(self, limit: int = UNDO_LIMIT):
         self.limit = limit
-        self._root = tempfile.mkdtemp(prefix="ImageEditor-undo-")
+        self._root = tempfile.mkdtemp(prefix="LibrionZonerPlus-undo-")
         self._done: list[UndoStep] = []
         self._undone: list[UndoStep] = []
         self._counter = 0

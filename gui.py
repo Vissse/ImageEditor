@@ -28,14 +28,14 @@ from PySide6.QtWidgets import (
 
 from core.processing import Operations, process_file, SUPPORTED_EXTENSIONS
 from core.qimage import read_image
-from core.config import CURRENT_VERSION, APP_NAME
+from core.config import CURRENT_VERSION, APP_NAME, OLD_INTERNAL_NAME
 from core.updater import (
     UpdateCheckWorker, DownloadWorker, run_installer, can_self_update,
 )
 from splash import SplashScreen
 from preview import PreviewDialog
 from dialogs import confirm, information, toast, warning, whats_new
-from core.changelog import CHANGELOG, changes_since
+from core.changelog import history
 from core.undo import UndoStack, UndoStep
 from core.state import FolderState, OPERATION_DESCRIPTIONS, OPERATION_LABELS
 from core.export import ExportWorker, same_folder, unique_path
@@ -659,7 +659,11 @@ class MainWindow(QMainWindow):
         if os.path.isfile(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self.settings = QSettings("PhotoBatchEditor", "PhotoBatchEditor")
+        self.settings = QSettings(APP_NAME, APP_NAME)
+        if not self.settings.allKeys():  # first start after the rename
+            old = QSettings(OLD_INTERNAL_NAME, OLD_INTERNAL_NAME)
+            for key in old.allKeys():
+                self.settings.setValue(key, old.value(key))
         self.folder: str | None = None
         self.root_folder: str = ""
         self.state: FolderState | None = None
@@ -965,15 +969,15 @@ class MainWindow(QMainWindow):
 
     # -- What's new -----------------------------------------------------------
     def show_whats_new(self) -> None:
-        whats_new(self, [entry for entry in CHANGELOG if entry[0] == CURRENT_VERSION] or CHANGELOG[:1])
+        whats_new(self, history(CURRENT_VERSION))
 
     def show_whats_new_after_update(self) -> None:
-        """Once per new version: what changed since the last version seen."""
+        """Once per new version, with the earlier versions' news below."""
         seen = self.settings.value("seen_version", "", type=str)
         if seen == CURRENT_VERSION:
             return
         self.settings.setValue("seen_version", CURRENT_VERSION)
-        whats_new(self, changes_since(seen, CURRENT_VERSION))
+        whats_new(self, history(CURRENT_VERSION))
 
     # -- Adding files ------------------------------------------------------
     def choose_files_to_add(self) -> None:

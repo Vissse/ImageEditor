@@ -12,6 +12,9 @@ CHANGELOG: list[tuple[str, list[str]]] = [
         "a aplikace sama najde obrázek na jednobarevném pozadí, třeba naskenovanou "
         "stránku nebo obálku knihy. Rámeček jde ještě doladit, pak stačí „Uložit ořez“.",
     ]),
+    ("1.3.1", [
+        "Aplikace už neukládá svůj pomocný soubor do složky s fotkami (např. na Plochu).",
+    ]),
     ("1.3.0", [
         "Ořez fotek – klikněte na fotku, pak „Oříznout“ (nebo klávesa C) a táhněte "
         "za úchyty rámečku jako v Malování.",
@@ -40,10 +43,7 @@ def _key(version: str) -> tuple[int, ...]:
         return (0,)
 
 
-def changes_since(seen: str, current: str) -> list[tuple[str, list[str]]]:
-    """Entries newer than `seen` up to `current`, newest first. With nothing
-    seen yet (first run, or an update from a version without this feature)
-    just the current version's entry."""
-    if not seen:
-        return [entry for entry in CHANGELOG if entry[0] == current]
-    return [entry for entry in CHANGELOG if _key(seen) < _key(entry[0]) <= _key(current)]
+def history(current: str) -> list[tuple[str, list[str]]]:
+    """All entries up to `current`, newest first - what "Co je nového" shows,
+    so the earlier versions' news stay readable after an update."""
+    return [entry for entry in CHANGELOG if _key(entry[0]) <= _key(current)]

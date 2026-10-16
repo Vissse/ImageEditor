@@ -98,7 +98,7 @@ class DownloadWorker(QThread):
         self._total = total_size
 
     def run(self) -> None:
-        handle, target = tempfile.mkstemp(prefix="ImageEditor_update_", suffix=".exe")
+        handle, target = tempfile.mkstemp(prefix="LibrionZonerPlus_update_", suffix=".exe")
         os.close(handle)
         try:
             request = urllib.request.Request(self._url, headers=_HEADERS)

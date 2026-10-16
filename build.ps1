@@ -1,5 +1,5 @@
 # Builds the app (PyInstaller, one folder) and the installer (Inno Setup).
-# Result: Output\ImageEditor_Setup.exe. Run from this project folder.
+# Result: Output\LibrionZonerPlus_Setup.exe. Run from this project folder.
 # Needs Inno Setup 6 (https://jrsoftware.org/isinfo.php).
 
 $projectDir = $PSScriptRoot
@@ -13,7 +13,7 @@ function Run-Step([string]$what, [scriptblock]$command) {
 Run-Step "Instalace zavislosti" { pip install -q --disable-pip-version-check -r requirements.txt }
 
 Run-Step "PyInstaller" {
-    python -m PyInstaller --noconfirm --onedir --windowed --name ImageEditor `
+    python -m PyInstaller --noconfirm --onedir --windowed --name LibrionZonerPlus `
         --icon icon.ico `
         --add-data "icon.ico;." `
         main.py
@@ -30,5 +30,5 @@ if (-not $iscc) { throw "Inno Setup 6 (ISCC.exe) nenalezen." }
 
 Run-Step "Inno Setup" { & $iscc inno.iss }
 
-Remove-Item -Recurse -Force build, ImageEditor.spec -ErrorAction SilentlyContinue
-Write-Host "Hotovo: $projectDir\Output\ImageEditor_Setup.exe (verze $env:APP_VERSION)"
+Remove-Item -Recurse -Force build, LibrionZonerPlus.spec -ErrorAction SilentlyContinue
+Write-Host "Hotovo: $projectDir\Output\LibrionZonerPlus_Setup.exe (verze $env:APP_VERSION)"
