@@ -1,4 +1,4 @@
-"""Image operations: resize, black border, JPEG conversion, crop.
+"""Image operations: resize, black border, JPEG conversion, crop, smart crop.
 
 Each operation takes a PIL.Image and returns a new PIL.Image. The pipeline
 is applied in a fixed, sensible order regardless of which combination of
@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 try:  # HEIC/HEIF photos from iPhones
     import pillow_heif
@@ -259,3 +259,47 @@ def crop_file(path: str, box: tuple[float, float, float, float]) -> None:
         cropped.save(path, exif=exif_bytes)
     else:
         cropped.save(path)
+
+
+def detect_content_box(path: str, tolerance: int = 40, min_share: float = 0.01,
+                       work_edge: int = 1600) -> tuple[float, float, float, float] | None:
+    """Smart crop: finds the picture (a book cover, a scanned page...) lying on
+    a plain background. The background colour is taken from the image edges;
+    rows and columns where at least `min_share` of pixels differ from it by more
+    than `tolerance` count as content. Returns (left, top, right, bottom) as
+    fractions of the upright image, like crop_file takes, or None when there is
+    no plain background to cut away."""
+    with Image.open(path) as img:
+        img.load()
+        upright = to_rgb(ImageOps.exif_transpose(img))
+    image = resize_to_max_edge(upright, work_edge)
+    width, height = image.size
+    if width < 8 or height < 8:
+        return None
+
+    edge = Image.new("RGB", (2 * (width + height), 2))
+    edge.paste(image.crop((0, 0, width, 2)), (0, 0))
+    edge.paste(image.crop((0, height - 2, width, height)), (width, 0))
+    edge.paste(image.crop((0, 0, 2, height)).rotate(90, expand=True), (2 * width, 0))
+    edge.paste(image.crop((width - 2, 0, width, height)).rotate(90, expand=True), (2 * width + height, 0))
+    background = tuple(int(v) for v in ImageStat.Stat(edge).median)
+
+    diff = ImageChops.difference(image, Image.new("RGB", image.size, background))
+    r, g, b = diff.split()
+    mask = ImageChops.lighter(ImageChops.lighter(r, g), b).point(lambda v: 255 if v > tolerance else 0)
+    mask = mask.filter(ImageFilter.MinFilter(3))  # drop lone noisy pixels (JPEG artefacts)
+
+    def span(profile: list[int]) -> tuple[int, int] | None:
+        hits = [i for i, v in enumerate(profile) if v > 255 * min_share]
+        return (hits[0], hits[-1] + 1) if hits else None
+
+    cols = span(list(mask.resize((width, 1), Image.BOX).getdata()))
+    rows = span(list(mask.resize((1, height), Image.BOX).getdata()))
+    if cols is None or rows is None:
+        return None
+    # The 3 px filter shrank the content by one pixel on each side.
+    left, right = max(cols[0] - 1, 0), min(cols[1] + 1, width)
+    top, bottom = max(rows[0] - 1, 0), min(rows[1] + 1, height)
+    if (right - left) * (bottom - top) > 0.98 * width * height:
+        return None  # content fills the image, nothing to cut away
+    return left / width, top / height, right / width, bottom / height

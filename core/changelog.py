@@ -7,6 +7,11 @@ can now do, not how it is implemented), and bump CURRENT_VERSION to match.
 from __future__ import annotations
 
 CHANGELOG: list[tuple[str, list[str]]] = [
+    ("1.3.2", [
+        "Chytrý ořez – v náhledu fotky klikněte na „Chytrý ořez“ (nebo klávesa A) "
+        "a aplikace sama najde obrázek na jednobarevném pozadí, třeba naskenovanou "
+        "stránku nebo obálku knihy. Rámeček jde ještě doladit, pak stačí „Uložit ořez“.",
+    ]),
     ("1.3.0", [
         "Ořez fotek – klikněte na fotku, pak „Oříznout“ (nebo klávesa C) a táhněte "
         "za úchyty rámečku jako v Malování.",

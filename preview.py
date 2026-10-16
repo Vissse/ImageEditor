@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from core.processing import crop_file, is_convert_only
+from core.processing import crop_file, detect_content_box, is_convert_only
 from core.qimage import read_image
 from dialogs import warning
 from splash import _Panel
@@ -89,6 +89,16 @@ class _Plate(QWidget):
         self._sel = self._image_rect() if on else QRectF()
         self._drag = None
         self.setCursor(Qt.ArrowCursor)
+        self.update()
+        self.selection_changed.emit()
+
+    def set_selection_fraction(self, box: tuple[float, float, float, float]) -> None:
+        img = self._image_rect()
+        left, top, right, bottom = box
+        self._sel = QRectF(
+            QPointF(img.left() + left * img.width(), img.top() + top * img.height()),
+            QPointF(img.left() + right * img.width(), img.top() + bottom * img.height()),
+        )
         self.update()
         self.selection_changed.emit()
 
@@ -280,10 +290,11 @@ class PreviewDialog(QDialog):
         self.size_label = QLabel()
         self.size_label.setStyleSheet("font-size: 12px; color: rgba(241, 240, 250, 160);")
         header.addWidget(self.size_label)
+        self.smart_btn = _header_button("Chytrý ořez", self._smart_crop)
         self.crop_btn = _header_button("Oříznout", self._start_crop)
         self.cancel_btn = _header_button("Zrušit", self._cancel_crop)
         self.save_btn = _header_button("Uložit ořez", self._save_crop, "PrimaryButton")
-        for btn in (self.crop_btn, self.cancel_btn, self.save_btn):
+        for btn in (self.smart_btn, self.crop_btn, self.cancel_btn, self.save_btn):
             header.addWidget(btn)
         close = _CloseButton()
         close.clicked.connect(self.accept)
@@ -303,11 +314,15 @@ class PreviewDialog(QDialog):
 
         if self.plate is None:
             self.crop_btn.setEnabled(False)
+            self.smart_btn.setEnabled(False)
         elif is_convert_only(path):
             self.crop_btn.setEnabled(False)
+            self.smart_btn.setEnabled(False)
             self.crop_btn.setToolTip("Tento formát nejde oříznout – nejdřív ho převeďte na JPEG")
         else:
             self.crop_btn.setToolTip("Oříznout fotku tažením za úchyty rámečku (C)")
+            self.smart_btn.setToolTip("Najde obrázek na jednobarevném pozadí a nastaví na něj rámeček (A)")
+        self._smart_failed = False
         self._cropping = False
         self._update_crop_ui()
 
@@ -344,8 +359,24 @@ class PreviewDialog(QDialog):
         self._cropping = True
         self.plate.set_crop_mode(True)
 
+    def _smart_crop(self) -> None:
+        # Sets the frame onto the detected picture; the user checks it and saves.
+        if self.plate is None or not self.smart_btn.isEnabled():
+            return
+        try:
+            box = detect_content_box(self.path)
+        except Exception:  # noqa: BLE001
+            box = None
+        if not self._cropping:
+            self._start_crop()
+        self._smart_failed = box is None
+        if box is not None:
+            self.plate.set_selection_fraction(box)
+        self._update_crop_ui()
+
     def _cancel_crop(self) -> None:
         self._cropping = False
+        self._smart_failed = False
         if self.plate is not None:
             self.plate.set_crop_mode(False)
 
@@ -374,7 +405,9 @@ class PreviewDialog(QDialog):
         has = self.plate is not None and self.plate.has_selection()
         self.save_btn.setEnabled(has)
         size = self._full_size
-        if cropping and size.isValid():
+        if cropping and self._smart_failed and not has:
+            self.size_label.setText("Pozadí k oříznutí nenalezeno")
+        elif cropping and size.isValid():
             sel = self.plate.selection_pixels(size)
             self.size_label.setText(f"výřez {sel.width()} × {sel.height()} px")
         elif cropping:
@@ -400,12 +433,17 @@ class PreviewDialog(QDialog):
                 self._cancel_crop()
             elif key in (Qt.Key_Return, Qt.Key_Enter):
                 self._save_crop()
+            elif key == Qt.Key_A:
+                self._smart_crop()
             return
         if key in (Qt.Key_Escape, Qt.Key_Space):
             self.accept()
             return
         if key == Qt.Key_C:
             self._start_crop()
+            return
+        if key == Qt.Key_A:
+            self._smart_crop()
             return
         super().keyPressEvent(event)
 
